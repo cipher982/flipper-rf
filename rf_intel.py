@@ -4,24 +4,35 @@ RF Intelligence Stream - Real signal analysis, not just counting
 Fast capture + fingerprinting + multi-sense
 """
 
+import argparse
 import asyncio
 import json
 import re
+import os
 import time
+import sys
+import glob
+import random
 import serial
 import threading
 import queue
 import hashlib
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from collections import defaultdict, deque
+from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
 import websockets
 
-# Config
-FLIPPER_PORT = '/dev/cu.usbmodemflip_Ly0p11'
-WS_PORT = 8766
-HTTP_PORT = 8765
-CAPTURE_DURATION = 0.6  # Faster captures
+# Defaults
+DEFAULT_FLIPPER_PORT = '/dev/cu.usbmodemflip_Ly0p11'  # pass --port auto to detect
+DEFAULT_WS_PORT = 8766
+DEFAULT_HTTP_PORT = 8765
+DEFAULT_CAPTURE_DURATION = 0.6
+DEFAULT_WORK_DIR = Path('/tmp/flipper_explore')
+DEFAULT_FREQS_HZ = (315_000_000, 433_920_000, 868_000_000, 915_000_000)
 
 # Shared state
 data_queue = queue.Queue()
@@ -31,6 +42,119 @@ clients = set()
 fingerprint_db = {}  # hash -> {first_seen, last_seen, count, freq, avg_duration, pulses}
 recent_fingerprints = deque(maxlen=500)  # Last 500 fingerprints with timestamps
 band_stats = defaultdict(lambda: {'bursts': deque(maxlen=100), 'fingerprints': set()})
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    flipper_port: str
+    ws_port: int
+    http_port: int
+    capture_duration: float
+    freqs_hz: tuple[int, ...]
+    work_dir: Path
+    mock: bool
+
+
+def hz_to_mhz(freq_hz: int) -> float:
+    return round(freq_hz / 1_000_000, 2)
+
+
+def parse_freqs(freqs: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of frequencies (MHz or Hz)."""
+    out: list[int] = []
+    for part in freqs.split(','):
+        s = part.strip()
+        if not s:
+            continue
+
+        try:
+            val = Decimal(s)
+        except InvalidOperation as e:
+            raise ValueError(f"Invalid frequency: {part!r}") from e
+
+        if val >= Decimal('1000000'):  # treat as Hz
+            hz = int(val.to_integral_value(rounding=ROUND_HALF_UP))
+        else:  # treat as MHz
+            hz = int((val * Decimal('1000000')).to_integral_value(rounding=ROUND_HALF_UP))
+
+        if hz <= 0:
+            raise ValueError(f"Invalid frequency: {part!r}")
+
+        out.append(hz)
+
+    if not out:
+        raise ValueError("No frequencies provided")
+
+    # de-dupe while keeping order
+    seen: set[int] = set()
+    uniq = []
+    for hz in out:
+        if hz not in seen:
+            seen.add(hz)
+            uniq.append(hz)
+
+    return tuple(uniq)
+
+
+def detect_flipper_port() -> str | None:
+    """Best-effort auto-detect of Flipper Zero serial port."""
+    if sys.platform == 'darwin':
+        patterns = [
+            '/dev/cu.usbmodemflip*',
+            '/dev/cu.usbmodem*Flipper*',
+            '/dev/cu.usbmodem*flipper*',
+        ]
+    elif sys.platform.startswith('linux'):
+        patterns = [
+            '/dev/ttyACM*',
+            '/dev/ttyUSB*',
+        ]
+    else:
+        patterns = []
+
+    candidates: list[str] = []
+    for pat in patterns:
+        candidates.extend(glob.glob(pat))
+
+    candidates = sorted(set(candidates))
+    return candidates[0] if candidates else None
+
+
+def build_config() -> AppConfig:
+    parser = argparse.ArgumentParser(description="RF Intel - fingerprinting dashboard")
+    parser.add_argument('--port', default=os.environ.get('FLIPPER_PORT') or DEFAULT_FLIPPER_PORT,
+                        help='Serial port path (or "auto")')
+    parser.add_argument('--ws-port', type=int, default=DEFAULT_WS_PORT, help='WebSocket port')
+    parser.add_argument('--http-port', type=int, default=DEFAULT_HTTP_PORT, help='HTTP port')
+    parser.add_argument('--capture-duration', type=float, default=DEFAULT_CAPTURE_DURATION,
+                        help='Capture duration per frequency (seconds)')
+    parser.add_argument('--freqs', default=','.join(str(hz_to_mhz(f)) for f in DEFAULT_FREQS_HZ),
+                        help='Comma-separated frequencies (MHz or Hz), e.g. 433.92 or 433920000')
+    parser.add_argument('--work-dir', default=str(DEFAULT_WORK_DIR),
+                        help='Directory to write and serve intel.html from')
+    parser.add_argument('--mock', action='store_true', help='Run without a Flipper; generate synthetic bursts')
+    args = parser.parse_args()
+
+    freqs_hz = parse_freqs(args.freqs)
+
+    port = args.port
+    if port == 'auto' or (port and not os.path.exists(port)):
+        detected = detect_flipper_port()
+        if detected:
+            port = detected
+
+    if not port and not args.mock:
+        raise SystemExit("No Flipper port found. Pass --port PATH or use --mock.")
+
+    return AppConfig(
+        flipper_port=port or '',
+        ws_port=args.ws_port,
+        http_port=args.http_port,
+        capture_duration=args.capture_duration,
+        freqs_hz=freqs_hz,
+        work_dir=Path(args.work_dir),
+        mock=args.mock,
+    )
 
 
 def extract_bursts(timings, gap_threshold=50000):
@@ -209,7 +333,7 @@ def get_top_fingerprints(limit=8):
     return [details[fp] for fp, _ in top if fp in details]
 
 
-def get_device_info(ser):
+def get_device_info(ser, port: str) -> dict:
     """Get Flipper device telemetry."""
     try:
         ser.write(b'uptime\r\n')
@@ -223,167 +347,263 @@ def get_device_info(ser):
         return {
             'uptime': uptime,
             'connected': True,
-            'port': FLIPPER_PORT.split('/')[-1],
+            'port': (port or '--').split('/')[-1],
         }
-    except:
+    except Exception:
         return {'uptime': '--', 'connected': False, 'port': '--'}
 
 
-def capture_thread():
-    """Fast capture with intelligence extraction."""
-    print("Capture thread starting...")
+_MOCK_DEVICE_BASES: dict[tuple[float, int], tuple[int, int]] = {}
 
-    try:
-        ser = serial.Serial(FLIPPER_PORT, 230400, timeout=0.3)
-        time.sleep(0.3)
-        ser.read(ser.in_waiting)
-        print(f"Flipper connected: {FLIPPER_PORT}")
-    except Exception as e:
-        print(f"Flipper error: {e}")
-        data_queue.put({'type': 'error', 'msg': str(e)})
+
+def mock_timings(freq_mhz: float) -> list[int]:
+    """Generate synthetic timing data with burst boundaries."""
+    ranges = {
+        315.0: (200, 500),
+        433.92: (200, 800),
+        868.0: (250, 700),
+        915.0: (15, 90),
+    }
+
+    pr = ranges.get(freq_mhz, (200, 600))
+
+    n_bursts = random.choices([0, 1, 2, 3], weights=[2, 5, 3, 1])[0]
+    if n_bursts == 0:
+        return []
+
+    timings: list[int] = []
+    for _ in range(n_bursts):
+        device_slot = random.randint(1, 4)
+        key = (freq_mhz, device_slot)
+        if key not in _MOCK_DEVICE_BASES:
+            pulse = random.randrange(max(10, pr[0] // 50 * 50), pr[1] // 50 * 50 + 1, 50)
+            gap = random.randrange(200, 1200, 50)
+            _MOCK_DEVICE_BASES[key] = (pulse, gap)
+
+        pulse, gap = _MOCK_DEVICE_BASES[key]
+        n_pulses = random.randint(20, 80)
+        for _i in range(n_pulses):
+            timings.append(max(10, pulse + random.randint(-20, 20)))
+            timings.append(-max(10, gap + random.randint(-50, 50)))
+
+        timings.append(-random.randint(60_000, 90_000))
+
+    return timings
+
+
+def capture_thread(config: AppConfig):
+    """Fast capture with intelligence extraction."""
+    if config.mock:
+        print("Mock capture thread starting...")
+        data_queue.put({'type': 'status', 'connected': True, 'mock': True, 'ts': time.time()})
+        cycle = 0
+        last_telemetry = 0
+
+        while True:
+            cycle += 1
+            cycle_start = time.time()
+
+            all_bursts = []
+            freq_results = []
+            new_signals = []
+
+            for freq_hz in config.freqs_hz:
+                freq_mhz = hz_to_mhz(freq_hz)
+                timings = mock_timings(freq_mhz)
+
+                bursts = extract_bursts(timings)
+                freq_bursts = []
+                for burst in bursts:
+                    analysis = analyze_burst(burst)
+                    if not analysis:
+                        continue
+
+                    fp = compute_fingerprint(burst)
+                    analysis['fp'] = fp
+                    analysis['freq'] = freq_mhz
+                    analysis['ts'] = time.time()
+                    analysis['timings'] = burst[:60]
+                    freq_bursts.append(analysis)
+
+                    if fp:
+                        is_new = fp not in fingerprint_db
+                        ts = time.time()
+                        if is_new:
+                            fingerprint_db[fp] = {'first_seen': ts, 'last_seen': ts, 'count': 1, 'freq': freq_mhz}
+                            new_signals.append({'fp': fp, 'freq': freq_mhz, 'ts': ts})
+                        else:
+                            fingerprint_db[fp]['last_seen'] = ts
+                            fingerprint_db[fp]['count'] += 1
+
+                        recent_fingerprints.append({
+                            'fp': fp,
+                            'freq': freq_mhz,
+                            'ts': ts,
+                            'duration_ms': analysis['duration_ms'],
+                            'n_pulses': analysis['n_pulses'],
+                            'histogram': analysis['histogram'],
+                        })
+                        band_stats[freq_mhz]['bursts'].append({'ts': ts, 'fp': fp, 'duration_ms': analysis['duration_ms']})
+                        band_stats[freq_mhz]['fingerprints'].add(fp)
+
+                all_bursts.extend(freq_bursts)
+                freq_results.append({
+                    'freq': freq_mhz,
+                    'n_bursts': len(freq_bursts),
+                    'n_transitions': len(timings),
+                    'health': compute_band_health(freq_mhz),
+                    'best_burst': freq_bursts[0] if freq_bursts else None,
+                })
+                data_queue.put({'type': 'freq', 'data': freq_results[-1]})
+                time.sleep(max(0.05, config.capture_duration))
+
+            cycle_data = {
+                'type': 'cycle',
+                'cycle': cycle,
+                'ts': time.time(),
+                'duration': round(time.time() - cycle_start, 2),
+                'total_bursts': len(all_bursts),
+                'total_transitions': sum(r['n_transitions'] for r in freq_results),
+                'freqs': freq_results,
+                'top_fingerprints': get_top_fingerprints(8),
+                'new_signals': new_signals,
+                'total_unique': len(fingerprint_db),
+            }
+            data_queue.put(cycle_data)
+
+            if time.time() - last_telemetry > 10:
+                data_queue.put({'type': 'telemetry', 'data': {'uptime': '--', 'connected': True, 'port': 'mock'}})
+                last_telemetry = time.time()
         return
 
-    frequencies = [
-        (315000000, 315.0),
-        (433920000, 433.92),
-        (868000000, 868.0),
-        (915000000, 915.0),
-    ]
-
+    print("Capture thread starting...")
+    data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
     cycle = 0
     last_telemetry = 0
 
     while True:
-        cycle += 1
-        cycle_start = time.time()
+        try:
+            ser = serial.Serial(config.flipper_port, 230400, timeout=0.3)
+            time.sleep(0.3)
+            ser.read(ser.in_waiting)
+            print(f"Flipper connected: {config.flipper_port}")
+            data_queue.put({'type': 'status', 'connected': True, 'mock': False, 'port': config.flipper_port, 'ts': time.time()})
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            print(f"Flipper error: {msg}")
+            data_queue.put({'type': 'error', 'msg': msg, 'ts': time.time()})
+            data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
+            time.sleep(2.0)
+            continue
 
-        all_bursts = []
-        freq_results = []
-        new_signals = []
+        try:
+            while True:
+                cycle += 1
+                cycle_start = time.time()
 
-        for freq_hz, freq_mhz in frequencies:
-            # Fast capture
-            ser.write(f'subghz rx_raw {freq_hz}\r\n'.encode())
+                all_bursts = []
+                freq_results = []
+                new_signals = []
 
-            raw = b''
-            start = time.time()
-            while time.time() - start < CAPTURE_DURATION:
-                time.sleep(0.02)
-                if ser.in_waiting:
-                    raw += ser.read(ser.in_waiting)
+                for freq_hz in config.freqs_hz:
+                    freq_mhz = hz_to_mhz(freq_hz)
+                    ser.write(f'subghz rx_raw {freq_hz}\r\n'.encode())
 
-            ser.write(b'\x03')
-            time.sleep(0.05)
-            raw += ser.read(ser.in_waiting or 2048)
+                    raw = b''
+                    start = time.time()
+                    while time.time() - start < config.capture_duration:
+                        time.sleep(0.02)
+                        if ser.in_waiting:
+                            raw += ser.read(ser.in_waiting)
 
-            # Parse timings
-            text = raw.decode('utf-8', errors='replace')
-            timings = [int(t) for t in re.findall(r'([+-]\d+)', text)]
+                    ser.write(b'\x03')
+                    time.sleep(0.05)
+                    raw += ser.read(ser.in_waiting or 2048)
 
-            # Extract bursts
-            bursts = extract_bursts(timings)
+                    text = raw.decode('utf-8', errors='replace')
+                    timings = [int(t) for t in re.findall(r'([+-]\d+)', text)]
 
-            # Analyze each burst
-            freq_bursts = []
-            for burst in bursts:
-                analysis = analyze_burst(burst)
-                if not analysis:
-                    continue
+                    bursts = extract_bursts(timings)
+                    freq_bursts = []
+                    for burst in bursts:
+                        analysis = analyze_burst(burst)
+                        if not analysis:
+                            continue
 
-                fp = compute_fingerprint(burst)
-                analysis['fp'] = fp
-                analysis['freq'] = freq_mhz
-                analysis['ts'] = time.time()
-                analysis['timings'] = burst[:60]  # Keep some raw data
+                        fp = compute_fingerprint(burst)
+                        analysis['fp'] = fp
+                        analysis['freq'] = freq_mhz
+                        analysis['ts'] = time.time()
+                        analysis['timings'] = burst[:60]
+                        freq_bursts.append(analysis)
 
-                freq_bursts.append(analysis)
+                        if fp:
+                            is_new = fp not in fingerprint_db
+                            ts = time.time()
+                            if is_new:
+                                fingerprint_db[fp] = {'first_seen': ts, 'last_seen': ts, 'count': 1, 'freq': freq_mhz}
+                                new_signals.append({'fp': fp, 'freq': freq_mhz, 'ts': ts})
+                            else:
+                                fingerprint_db[fp]['last_seen'] = ts
+                                fingerprint_db[fp]['count'] += 1
 
-                # Track fingerprint
-                if fp:
-                    is_new = fp not in fingerprint_db
+                            recent_fingerprints.append({
+                                'fp': fp,
+                                'freq': freq_mhz,
+                                'ts': ts,
+                                'duration_ms': analysis['duration_ms'],
+                                'n_pulses': analysis['n_pulses'],
+                                'histogram': analysis['histogram'],
+                            })
 
-                    if is_new:
-                        fingerprint_db[fp] = {
-                            'first_seen': time.time(),
-                            'last_seen': time.time(),
-                            'count': 1,
-                            'freq': freq_mhz,
-                        }
-                        new_signals.append({
-                            'fp': fp,
-                            'freq': freq_mhz,
-                            'ts': time.time(),
-                        })
-                    else:
-                        fingerprint_db[fp]['last_seen'] = time.time()
-                        fingerprint_db[fp]['count'] += 1
+                            band_stats[freq_mhz]['bursts'].append({'ts': ts, 'fp': fp, 'duration_ms': analysis['duration_ms']})
+                            band_stats[freq_mhz]['fingerprints'].add(fp)
 
-                    # Add to recent
-                    recent_fingerprints.append({
-                        'fp': fp,
+                    all_bursts.extend(freq_bursts)
+                    freq_results.append({
                         'freq': freq_mhz,
-                        'ts': time.time(),
-                        'duration_ms': analysis['duration_ms'],
-                        'n_pulses': analysis['n_pulses'],
-                        'histogram': analysis['histogram'],
+                        'n_bursts': len(freq_bursts),
+                        'n_transitions': len(timings),
+                        'health': compute_band_health(freq_mhz),
+                        'best_burst': freq_bursts[0] if freq_bursts else None,
                     })
+                    data_queue.put({'type': 'freq', 'data': freq_results[-1]})
 
-                    # Track band stats
-                    band_stats[freq_mhz]['bursts'].append({
-                        'ts': time.time(),
-                        'fp': fp,
-                        'duration_ms': analysis['duration_ms'],
-                    })
-                    band_stats[freq_mhz]['fingerprints'].add(fp)
+                cycle_data = {
+                    'type': 'cycle',
+                    'cycle': cycle,
+                    'ts': time.time(),
+                    'duration': round(time.time() - cycle_start, 2),
+                    'total_bursts': len(all_bursts),
+                    'total_transitions': sum(r['n_transitions'] for r in freq_results),
+                    'freqs': freq_results,
+                    'top_fingerprints': get_top_fingerprints(8),
+                    'new_signals': new_signals,
+                    'total_unique': len(fingerprint_db),
+                }
+                data_queue.put(cycle_data)
 
-            all_bursts.extend(freq_bursts)
+                if time.time() - last_telemetry > 10:
+                    data_queue.put({'type': 'telemetry', 'data': get_device_info(ser, config.flipper_port)})
+                    last_telemetry = time.time()
 
-            # Freq summary
-            freq_results.append({
-                'freq': freq_mhz,
-                'n_bursts': len(freq_bursts),
-                'n_transitions': len(timings),
-                'health': compute_band_health(freq_mhz),
-                'best_burst': freq_bursts[0] if freq_bursts else None,
-            })
-
-            # Stream freq update immediately
-            data_queue.put({
-                'type': 'freq',
-                'data': freq_results[-1],
-            })
-
-        # Cycle summary
-        cycle_data = {
-            'type': 'cycle',
-            'cycle': cycle,
-            'ts': time.time(),
-            'duration': round(time.time() - cycle_start, 2),
-            'total_bursts': len(all_bursts),
-            'total_transitions': sum(r['n_transitions'] for r in freq_results),
-            'freqs': freq_results,
-            'top_fingerprints': get_top_fingerprints(8),
-            'new_signals': new_signals,
-            'total_unique': len(fingerprint_db),
-        }
-
-        data_queue.put(cycle_data)
-
-        # Telemetry every 10 cycles
-        if time.time() - last_telemetry > 10:
-            data_queue.put({
-                'type': 'telemetry',
-                'data': get_device_info(ser),
-            })
-            last_telemetry = time.time()
-
-        # Log
-        active = sum(1 for r in freq_results if r['n_bursts'] > 0)
-        new_count = len(new_signals)
-        new_str = f" +{new_count} NEW" if new_count else ""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] C{cycle}: "
-              f"{len(all_bursts)} bursts, {active}/4 active, "
-              f"{len(fingerprint_db)} unique{new_str}")
+                active = sum(1 for r in freq_results if r['n_bursts'] > 0)
+                new_count = len(new_signals)
+                new_str = f" +{new_count} NEW" if new_count else ""
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] C{cycle}: "
+                      f"{len(all_bursts)} bursts, {active}/{len(config.freqs_hz)} active, "
+                      f"{len(fingerprint_db)} unique{new_str}")
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            print(f"Capture loop error: {msg}")
+            data_queue.put({'type': 'error', 'msg': msg, 'ts': time.time()})
+            data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+            time.sleep(1.0)
 
 
 async def broadcast_loop():
@@ -434,16 +654,15 @@ async def ws_handler(websocket, path=None):
         print(f"Client disconnected ({len(clients)})")
 
 
-def http_thread():
+def http_thread(config: AppConfig):
     """HTTP server."""
-    import os
-    os.chdir('/tmp/flipper_explore')
 
     class QuietHandler(SimpleHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-    HTTPServer(('localhost', HTTP_PORT), QuietHandler).serve_forever()
+    handler = partial(QuietHandler, directory=str(config.work_dir))
+    HTTPServer(('localhost', config.http_port), handler).serve_forever()
 
 
 # Dashboard HTML - embedded
@@ -541,10 +760,14 @@ h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
 </div>
 </div>
 <script>
-const WS='ws://localhost:8766';
+const WS_PORT=__WS_PORT__;
+const WS=`${location.protocol==='https:'?'wss':'ws'}://${location.hostname}:${WS_PORT}`;
 let ws,freq={},hist=[],maxBursts=1,uniqueCount=0;
-const colors={315:'#3fb950',433.92:'#58a6ff',868:'#d29922',915:'#f85149'};
-const freqOrder=[315,433.92,868,915];
+const freqOrder=__FREQS__;
+const baseColors={315:'#3fb950',433.92:'#58a6ff',868:'#d29922',915:'#f85149'};
+const palette=['#3fb950','#58a6ff','#d29922','#f85149','#56d4dd','#a371f7','#f0883e'];
+const colors={};
+freqOrder.forEach((f,i)=>{colors[f]=baseColors[f]||palette[i%palette.length]});
 
 function connect(){
 ws=new WebSocket(WS);
@@ -558,6 +781,8 @@ function handle(m){
 if(m.type==='freq')updateFreq(m.data);
 else if(m.type==='cycle')updateCycle(m);
 else if(m.type==='telemetry')updateDevice(m.data);
+else if(m.type==='status')updateSourceStatus(m);
+else if(m.type==='error')showError(m.msg||'Unknown error');
 else if(m.type==='init'){uniqueCount=m.total_unique;renderFpList(m.top_fingerprints)}
 }
 
@@ -584,6 +809,23 @@ if(d.new_signals&&d.new_signals.length)showNewAlert(d.new_signals);
 
 function updateDevice(d){
 $('device').innerHTML='<span>⏱ '+d.uptime+'</span><span>📟 '+d.port+'</span>';
+}
+
+function updateSourceStatus(s){
+if(s.connected===false)$('connStatus').textContent='Flipper offline';
+else if(s.connected===true)$('connStatus').textContent=s.mock?'Mock':'Flipper';
+}
+
+function showError(msg){
+const a=document.createElement('div');
+a.className='alert';
+a.textContent='ERROR: '+msg;
+a.style.position='fixed';
+a.style.top='60px';
+a.style.right='16px';
+a.style.background='var(--red)';
+document.body.appendChild(a);
+setTimeout(()=>a.remove(),3500);
 }
 
 function renderFreqGrid(){
@@ -682,18 +924,27 @@ async def main():
     print("RF Intelligence Stream")
     print("=" * 50)
 
-    with open('/tmp/flipper_explore/intel.html', 'w') as f:
-        f.write(DASHBOARD)
+    config = build_config()
+    config.work_dir.mkdir(parents=True, exist_ok=True)
+
+    (config.work_dir / 'intel.html').write_text(
+        DASHBOARD
+        .replace('__WS_PORT__', str(config.ws_port))
+        .replace('__FREQS__', json.dumps([hz_to_mhz(f) for f in config.freqs_hz])),
+        encoding='utf-8',
+    )
 
     # Start threads
-    threading.Thread(target=http_thread, daemon=True).start()
-    threading.Thread(target=capture_thread, daemon=True).start()
+    threading.Thread(target=http_thread, args=(config,), daemon=True).start()
+    threading.Thread(target=capture_thread, args=(config,), daemon=True).start()
 
-    print(f"HTTP: http://localhost:{HTTP_PORT}/intel.html")
-    print(f"WebSocket: ws://localhost:{WS_PORT}")
+    print(f"HTTP: http://localhost:{config.http_port}/intel.html")
+    print(f"WebSocket: ws://localhost:{config.ws_port}")
+    if config.mock:
+        print("Mode: mock (synthetic bursts)")
     print("Press Ctrl+C to stop\n")
 
-    await websockets.serve(ws_handler, 'localhost', WS_PORT)
+    await websockets.serve(ws_handler, 'localhost', config.ws_port)
     await broadcast_loop()
 
 

@@ -43,8 +43,13 @@ uv pip install pyserial websockets
 Full protocol classification and semantic labeling:
 
 ```bash
-python rf_decode.py
+python3 rf_decode.py --port auto
 # Open http://localhost:8765/decode.html
+```
+
+For UI/dev without a Flipper:
+```bash
+python3 rf_decode.py --mock
 ```
 
 ### RF Intel
@@ -52,7 +57,7 @@ python rf_decode.py
 Fingerprinting-focused view with burst detection:
 
 ```bash
-python rf_intel.py
+python3 rf_intel.py --port auto
 # Open http://localhost:8765/intel.html
 ```
 
@@ -73,12 +78,19 @@ with FlipperTool('/dev/cu.usbmodemflip_XXX') as f:
 
 ## Configuration
 
-Edit the `FLIPPER_PORT` constant in each script to match your device:
+Set the Flipper serial port via `--port` (or env var `FLIPPER_PORT`):
 
-```python
-FLIPPER_PORT = '/dev/cu.usbmodemflip_XXXXX'  # macOS
-# or
-FLIPPER_PORT = '/dev/ttyACM0'  # Linux
+```bash
+# macOS
+python3 rf_decode.py --port /dev/cu.usbmodemflip_XXXXX
+
+# Linux
+python3 rf_decode.py --port /dev/ttyACM0
+```
+
+You can also focus on a single band for faster/steadier updates:
+```bash
+python3 rf_decode.py --port auto --freqs 433.92
 ```
 
 ## Architecture

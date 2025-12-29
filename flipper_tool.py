@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-class FlipperZero:
+class FlipperTool:
     """Flipper Zero serial CLI interface."""
 
     def __init__(self, port: str = '/dev/cu.usbmodemflip_Ly0p11', baud: int = 230400):
@@ -195,7 +195,7 @@ def main():
     parser.add_argument('--json', action='store_true', help='Output as JSON')
     args = parser.parse_args()
 
-    with FlipperZero() as f:
+    with FlipperTool() as f:
         if args.command == 'info':
             result = f.device_info()
         elif args.command == 'ls':
@@ -215,3 +215,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# Backwards-compatible name (older scripts / docs)
+FlipperZero = FlipperTool

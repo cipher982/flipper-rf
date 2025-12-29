@@ -1,56 +1,32 @@
 # Flipper RF - Agent Instructions
 
-## Overview
+Real-time RF signal intelligence using Flipper Zero's Sub-GHz radio.
 
-RF signal analysis tools using Flipper Zero's Sub-GHz radio. Real-time streaming, fingerprinting, and protocol classification.
+## Core files
+- `rf_decode.py`: protocol classification dashboard (recommended)
+- `rf_intel.py`: fingerprinting + band health dashboard
+- `flipper_tool.py`: Flipper serial CLI helper (`FlipperTool`)
 
-## Quick Start
-
+## Dev setup (UV)
 ```bash
-# Setup
 uv venv && source .venv/bin/activate
-uv pip install pyserial websockets
-
-# Find your Flipper port
-ls /dev/cu.usbmodem*  # macOS
-ls /dev/ttyACM*       # Linux
-
-# Edit FLIPPER_PORT in rf_decode.py (line 21)
-
-# Run
-python rf_decode.py
-# Open http://localhost:8765/decode.html
+uv pip install websockets pyserial
 ```
 
-## Key Files
+## Run
+```bash
+# Auto-detect serial port (recommended)
+python3 rf_decode.py --port auto
+# http://localhost:8765/decode.html
 
-| File | Purpose |
-|------|---------|
-| `rf_decode.py` | Main tool - protocol classification + dashboard |
-| `rf_intel.py` | Fingerprinting-focused alternative |
-| `flipper_tool.py` | Python wrapper for Flipper CLI |
+python3 rf_intel.py --port auto
+# http://localhost:8765/intel.html
+```
 
-## Architecture
-
-- **Capture thread** - Serial reads from Flipper at 230400 baud
-- **Queue** - Thread-safe handoff to async loop
-- **WebSocket broadcast** - Push to browser clients at 30Hz
-- **Embedded HTML** - Dashboard generated at runtime
-
-## Protocol Classification
-
-Timing-based analysis in `classify_protocol()`:
-- Pulse width ranges
-- Gap ratios (short vs long)
-- Pulse counts (bit lengths)
-- Frequency band hints
-
-## Ports
-
-- HTTP: 8765 (dashboard)
-- WebSocket: 8766 (data stream)
-
-## Dependencies
-
-- pyserial
-- websockets
+## Useful flags
+- `--port PATH|auto` (or set `FLIPPER_PORT`)
+- `--freqs 433.92` (focus a single band) or `--freqs 315,433.92,868,915`
+- `--capture-duration 0.4` (per-frequency capture window)
+- `--http-port 8875 --ws-port 8876` (avoid conflicts)
+- `--work-dir /tmp/flipper_explore` (where dashboards are written/served)
+- `--mock` (no Flipper required; generates synthetic data for UI/dev)

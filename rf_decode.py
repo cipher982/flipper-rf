@@ -4,24 +4,35 @@ RF Decode - Protocol classification and semantic labeling
 Analyzes timing patterns to identify signal types
 """
 
+import argparse
 import asyncio
 import json
 import re
+import os
 import time
+import sys
+import glob
+import random
 import serial
 import threading
 import queue
 import hashlib
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from collections import defaultdict, deque
+from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
 import websockets
 
-# Config
-FLIPPER_PORT = '/dev/cu.usbmodemflip_Ly0p11'
-WS_PORT = 8766
-HTTP_PORT = 8765
-CAPTURE_DURATION = 0.8
+# Defaults
+DEFAULT_FLIPPER_PORT = '/dev/cu.usbmodemflip_Ly0p11'  # pass --port auto to detect
+DEFAULT_WS_PORT = 8766
+DEFAULT_HTTP_PORT = 8765
+DEFAULT_CAPTURE_DURATION = 0.8
+DEFAULT_WORK_DIR = Path('/tmp/flipper_explore')
+DEFAULT_FREQS_HZ = (315_000_000, 433_920_000, 868_000_000, 915_000_000)
 
 # Shared state
 data_queue = queue.Queue()
@@ -31,6 +42,119 @@ clients = set()
 signal_db = {}  # fp -> full signal info
 recent_signals = deque(maxlen=1000)
 band_stats = defaultdict(lambda: {'signals': deque(maxlen=200), 'protocols': defaultdict(int)})
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    flipper_port: str
+    ws_port: int
+    http_port: int
+    capture_duration: float
+    freqs_hz: tuple[int, ...]
+    work_dir: Path
+    mock: bool
+
+
+def hz_to_mhz(freq_hz: int) -> float:
+    return round(freq_hz / 1_000_000, 2)
+
+
+def parse_freqs(freqs: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of frequencies (MHz or Hz)."""
+    out: list[int] = []
+    for part in freqs.split(','):
+        s = part.strip()
+        if not s:
+            continue
+
+        try:
+            val = Decimal(s)
+        except InvalidOperation as e:
+            raise ValueError(f"Invalid frequency: {part!r}") from e
+
+        if val >= Decimal('1000000'):  # treat as Hz
+            hz = int(val.to_integral_value(rounding=ROUND_HALF_UP))
+        else:  # treat as MHz
+            hz = int((val * Decimal('1000000')).to_integral_value(rounding=ROUND_HALF_UP))
+
+        if hz <= 0:
+            raise ValueError(f"Invalid frequency: {part!r}")
+
+        out.append(hz)
+
+    if not out:
+        raise ValueError("No frequencies provided")
+
+    # de-dupe while keeping order
+    seen: set[int] = set()
+    uniq = []
+    for hz in out:
+        if hz not in seen:
+            seen.add(hz)
+            uniq.append(hz)
+
+    return tuple(uniq)
+
+
+def detect_flipper_port() -> str | None:
+    """Best-effort auto-detect of Flipper Zero serial port."""
+    if sys.platform == 'darwin':
+        patterns = [
+            '/dev/cu.usbmodemflip*',
+            '/dev/cu.usbmodem*Flipper*',
+            '/dev/cu.usbmodem*flipper*',
+        ]
+    elif sys.platform.startswith('linux'):
+        patterns = [
+            '/dev/ttyACM*',
+            '/dev/ttyUSB*',
+        ]
+    else:
+        patterns = []
+
+    candidates: list[str] = []
+    for pat in patterns:
+        candidates.extend(glob.glob(pat))
+
+    candidates = sorted(set(candidates))
+    return candidates[0] if candidates else None
+
+
+def build_config() -> AppConfig:
+    parser = argparse.ArgumentParser(description="RF Decode - protocol classification dashboard")
+    parser.add_argument('--port', default=os.environ.get('FLIPPER_PORT') or DEFAULT_FLIPPER_PORT,
+                        help='Serial port path (or "auto")')
+    parser.add_argument('--ws-port', type=int, default=DEFAULT_WS_PORT, help='WebSocket port')
+    parser.add_argument('--http-port', type=int, default=DEFAULT_HTTP_PORT, help='HTTP port')
+    parser.add_argument('--capture-duration', type=float, default=DEFAULT_CAPTURE_DURATION,
+                        help='Capture duration per frequency (seconds)')
+    parser.add_argument('--freqs', default=','.join(str(hz_to_mhz(f)) for f in DEFAULT_FREQS_HZ),
+                        help='Comma-separated frequencies (MHz or Hz), e.g. 433.92 or 433920000')
+    parser.add_argument('--work-dir', default=str(DEFAULT_WORK_DIR),
+                        help='Directory to write and serve decode.html from')
+    parser.add_argument('--mock', action='store_true', help='Run without a Flipper; generate synthetic signals')
+    args = parser.parse_args()
+
+    freqs_hz = parse_freqs(args.freqs)
+
+    port = args.port
+    if port == 'auto' or (port and not os.path.exists(port)):
+        detected = detect_flipper_port()
+        if detected:
+            port = detected
+
+    if not port and not args.mock:
+        raise SystemExit("No Flipper port found. Pass --port PATH or use --mock.")
+
+    return AppConfig(
+        flipper_port=port or '',
+        ws_port=args.ws_port,
+        http_port=args.http_port,
+        capture_duration=args.capture_duration,
+        freqs_hz=freqs_hz,
+        work_dir=Path(args.work_dir),
+        mock=args.mock,
+    )
 
 
 # ============ PROTOCOL SIGNATURES ============
@@ -360,154 +484,272 @@ def get_signal_label(signal):
         return f"{icon} {desc} (weak match)"
 
 
-def capture_thread():
-    """Capture and decode signals."""
-    print("Capture thread starting...")
+def decode_timings(timings: list[int], freq_mhz: float) -> tuple[list[dict], list[dict], int]:
+    """Decode a raw timing array for a single frequency."""
+    bursts = extract_bursts(timings)
 
-    try:
-        ser = serial.Serial(FLIPPER_PORT, 230400, timeout=0.3)
-        time.sleep(0.3)
-        ser.read(ser.in_waiting)
-        print(f"Flipper connected: {FLIPPER_PORT}")
-    except Exception as e:
-        print(f"Flipper error: {e}")
-        data_queue.put({'type': 'error', 'msg': str(e)})
-        return
+    freq_signals: list[dict] = []
+    new_signals: list[dict] = []
+    decoded_count = 0
 
-    frequencies = [
-        (315000000, 315.0),
-        (433920000, 433.92),
-        (868000000, 868.0),
-        (915000000, 915.0),
-    ]
+    for burst in bursts:
+        analysis = analyze_timing_pattern(burst)
+        if not analysis:
+            continue
 
-    cycle = 0
+        fp = compute_fingerprint(burst)
+        if not fp:
+            continue
 
-    while True:
-        cycle += 1
-        cycle_start = time.time()
+        proto = classify_protocol(analysis, freq_mhz)
 
-        all_signals = []
-        freq_results = []
-        new_signals = []
-        decoded_count = 0
-
-        for freq_hz, freq_mhz in frequencies:
-            # Capture
-            ser.write(f'subghz rx_raw {freq_hz}\r\n'.encode())
-
-            raw = b''
-            start = time.time()
-            while time.time() - start < CAPTURE_DURATION:
-                time.sleep(0.02)
-                if ser.in_waiting:
-                    raw += ser.read(ser.in_waiting)
-
-            ser.write(b'\x03')
-            time.sleep(0.05)
-            raw += ser.read(ser.in_waiting or 2048)
-
-            # Parse
-            text = raw.decode('utf-8', errors='replace')
-            timings = [int(t) for t in re.findall(r'([+-]\d+)', text)]
-
-            # Extract and analyze bursts
-            bursts = extract_bursts(timings)
-
-            freq_signals = []
-            for burst in bursts:
-                analysis = analyze_timing_pattern(burst)
-                if not analysis:
-                    continue
-
-                fp = compute_fingerprint(burst)
-                if not fp:
-                    continue
-
-                # Classify protocol
-                proto = classify_protocol(analysis, freq_mhz)
-
-                signal = {
-                    'fp': fp,
-                    'freq': freq_mhz,
-                    'ts': time.time(),
-                    'protocol': proto,
-                    'label': get_signal_label({'protocol': proto}),
-                    **analysis,
-                    'timings': burst[:80],
-                }
-
-                freq_signals.append(signal)
-
-                if proto and proto.get('confidence', 0) >= 30:
-                    decoded_count += 1
-
-                # Track in database
-                is_new = fp not in signal_db
-
-                if is_new:
-                    signal_db[fp] = {
-                        'first_seen': time.time(),
-                        'last_seen': time.time(),
-                        'count': 1,
-                        'freq': freq_mhz,
-                        'protocol': proto,
-                        'label': signal['label'],
-                    }
-                    new_signals.append(signal)
-                else:
-                    signal_db[fp]['last_seen'] = time.time()
-                    signal_db[fp]['count'] += 1
-
-                # Add to recent
-                recent_signals.append(signal)
-
-                # Band stats
-                band_stats[freq_mhz]['signals'].append(signal)
-                if proto:
-                    band_stats[freq_mhz]['protocols'][proto['protocol']] += 1
-
-            all_signals.extend(freq_signals)
-
-            # Frequency result
-            proto_summary = {}
-            for s in freq_signals:
-                p = s.get('protocol', {}).get('protocol', 'unknown')
-                proto_summary[p] = proto_summary.get(p, 0) + 1
-
-            freq_results.append({
-                'freq': freq_mhz,
-                'n_signals': len(freq_signals),
-                'n_transitions': len(timings),
-                'protocols': proto_summary,
-                'best_signal': freq_signals[0] if freq_signals else None,
-            })
-
-            # Stream immediately
-            data_queue.put({'type': 'freq', 'data': freq_results[-1]})
-
-        # Cycle summary
-        cycle_data = {
-            'type': 'cycle',
-            'cycle': cycle,
-            'ts': time.time(),
-            'duration': round(time.time() - cycle_start, 2),
-            'total_signals': len(all_signals),
-            'decoded_signals': decoded_count,
-            'freqs': freq_results,
-            'new_signals': [{'fp': s['fp'], 'freq': s['freq'], 'label': s['label']} for s in new_signals],
-            'total_unique': len(signal_db),
-            'top_signals': get_top_signals(10),
-            'protocol_stats': get_protocol_stats(),
+        ts = time.time()
+        signal = {
+            'fp': fp,
+            'freq': freq_mhz,
+            'ts': ts,
+            'protocol': proto,
+            'label': get_signal_label({'protocol': proto}),
+            **analysis,
+            'timings': burst[:80],
         }
 
-        data_queue.put(cycle_data)
+        freq_signals.append(signal)
 
-        # Log
-        new_str = f" +{len(new_signals)} NEW" if new_signals else ""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] C{cycle}: "
-              f"{len(all_signals)} signals ({decoded_count} decoded), "
-              f"{len(signal_db)} unique{new_str}")
+        if proto and proto.get('confidence', 0) >= 30:
+            decoded_count += 1
+
+        # Track in database
+        is_new = fp not in signal_db
+        if is_new:
+            signal_db[fp] = {
+                'first_seen': ts,
+                'last_seen': ts,
+                'count': 1,
+                'freq': freq_mhz,
+                'protocol': proto,
+                'label': signal['label'],
+            }
+            new_signals.append(signal)
+        else:
+            signal_db[fp]['last_seen'] = ts
+            signal_db[fp]['count'] += 1
+
+        recent_signals.append(signal)
+
+        band_stats[freq_mhz]['signals'].append(signal)
+        if proto:
+            band_stats[freq_mhz]['protocols'][proto['protocol']] += 1
+
+    return freq_signals, new_signals, decoded_count
+
+
+def build_proto_summary(freq_signals: list[dict]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for s in freq_signals:
+        p = s.get('protocol', {}).get('protocol', 'unknown')
+        summary[p] = summary.get(p, 0) + 1
+    return summary
+
+
+_MOCK_DEVICE_BASES: dict[tuple[float, str, int], tuple[int, int]] = {}
+
+
+def mock_timings(freq_mhz: float) -> list[int]:
+    """Generate synthetic timing data with burst boundaries."""
+    hints = FREQ_HINTS.get(freq_mhz, [])
+
+    eligible = [
+        (name, sig)
+        for name, sig in PROTOCOL_SIGNATURES.items()
+        if sig.get('category') in hints
+    ] or list(PROTOCOL_SIGNATURES.items())
+
+    n_bursts = random.choices([0, 1, 2, 3], weights=[2, 5, 3, 1])[0]
+    if n_bursts == 0:
+        return []
+
+    timings: list[int] = []
+    for _ in range(n_bursts):
+        proto_name, sig = random.choice(eligible)
+
+        # Pick a stable-ish "device slot" to produce repeatable fingerprints.
+        device_slot = random.randint(1, 3)
+        key = (freq_mhz, proto_name, device_slot)
+        if key not in _MOCK_DEVICE_BASES:
+            pr = sig.get('pulse_range', (200, 500))
+            pulse = random.randrange(max(50, pr[0] // 50 * 50), pr[1] // 50 * 50 + 1, 50)
+            gr = sig.get('gap_short') or sig.get('gap_range') or pr
+            gap = random.randrange(max(50, gr[0] // 50 * 50), gr[1] // 50 * 50 + 1, 50)
+            _MOCK_DEVICE_BASES[key] = (pulse, gap)
+
+        pulse, gap = _MOCK_DEVICE_BASES[key]
+
+        min_p = sig.get('min_pulses', 12)
+        n_pulses = random.randint(min_p, min_p + 12)
+        gl = sig.get('gap_long')
+
+        for i in range(n_pulses):
+            jitter = random.randint(-20, 20)
+            timings.append(max(10, pulse + jitter))
+
+            if gl and i % 8 == 7 and random.random() < 0.4:
+                gap_val = random.randint(gl[0], gl[1])
+            else:
+                gap_val = max(10, gap + random.randint(-20, 20))
+            timings.append(-gap_val)
+
+        # Burst separator (must exceed extract_bursts gap_threshold=30000)
+        timings.append(-random.randint(45_000, 80_000))
+
+    return timings
+
+
+def capture_thread(config: AppConfig):
+    """Capture and decode signals."""
+    if config.mock:
+        print("Mock capture thread starting...")
+        data_queue.put({'type': 'status', 'connected': True, 'mock': True, 'ts': time.time()})
+        cycle = 0
+        while True:
+            cycle += 1
+            cycle_start = time.time()
+
+            all_signals: list[dict] = []
+            freq_results: list[dict] = []
+            new_signals: list[dict] = []
+            decoded_count = 0
+
+            for freq_hz in config.freqs_hz:
+                freq_mhz = hz_to_mhz(freq_hz)
+                timings = mock_timings(freq_mhz)
+
+                freq_signals, freq_new, freq_decoded = decode_timings(timings, freq_mhz)
+                all_signals.extend(freq_signals)
+                new_signals.extend(freq_new)
+                decoded_count += freq_decoded
+
+                freq_results.append({
+                    'freq': freq_mhz,
+                    'n_signals': len(freq_signals),
+                    'n_transitions': len(timings),
+                    'protocols': build_proto_summary(freq_signals),
+                    'best_signal': freq_signals[0] if freq_signals else None,
+                })
+
+                data_queue.put({'type': 'freq', 'data': freq_results[-1]})
+                time.sleep(max(0.05, config.capture_duration))
+
+            cycle_data = {
+                'type': 'cycle',
+                'cycle': cycle,
+                'ts': time.time(),
+                'duration': round(time.time() - cycle_start, 2),
+                'total_signals': len(all_signals),
+                'decoded_signals': decoded_count,
+                'freqs': freq_results,
+                'new_signals': [{'fp': s['fp'], 'freq': s['freq'], 'label': s['label']} for s in new_signals],
+                'total_unique': len(signal_db),
+                'top_signals': get_top_signals(10),
+                'protocol_stats': get_protocol_stats(),
+            }
+            data_queue.put(cycle_data)
+        return
+
+    print("Capture thread starting...")
+    data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
+
+    cycle = 0
+    while True:
+        try:
+            ser = serial.Serial(config.flipper_port, 230400, timeout=0.3)
+            time.sleep(0.3)
+            ser.read(ser.in_waiting)
+            print(f"Flipper connected: {config.flipper_port}")
+            data_queue.put({'type': 'status', 'connected': True, 'mock': False, 'port': config.flipper_port, 'ts': time.time()})
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            print(f"Flipper error: {msg}")
+            data_queue.put({'type': 'error', 'msg': msg, 'ts': time.time()})
+            data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
+            time.sleep(2.0)
+            continue
+
+        try:
+            while True:
+                cycle += 1
+                cycle_start = time.time()
+
+                all_signals: list[dict] = []
+                freq_results: list[dict] = []
+                new_signals: list[dict] = []
+                decoded_count = 0
+
+                for freq_hz in config.freqs_hz:
+                    freq_mhz = hz_to_mhz(freq_hz)
+
+                    ser.write(f'subghz rx_raw {freq_hz}\r\n'.encode())
+
+                    raw = b''
+                    start = time.time()
+                    while time.time() - start < config.capture_duration:
+                        time.sleep(0.02)
+                        if ser.in_waiting:
+                            raw += ser.read(ser.in_waiting)
+
+                    ser.write(b'\x03')
+                    time.sleep(0.05)
+                    raw += ser.read(ser.in_waiting or 2048)
+
+                    text = raw.decode('utf-8', errors='replace')
+                    timings = [int(t) for t in re.findall(r'([+-]\d+)', text)]
+
+                    freq_signals, freq_new, freq_decoded = decode_timings(timings, freq_mhz)
+                    all_signals.extend(freq_signals)
+                    new_signals.extend(freq_new)
+                    decoded_count += freq_decoded
+
+                    freq_results.append({
+                        'freq': freq_mhz,
+                        'n_signals': len(freq_signals),
+                        'n_transitions': len(timings),
+                        'protocols': build_proto_summary(freq_signals),
+                        'best_signal': freq_signals[0] if freq_signals else None,
+                    })
+
+                    data_queue.put({'type': 'freq', 'data': freq_results[-1]})
+
+                cycle_data = {
+                    'type': 'cycle',
+                    'cycle': cycle,
+                    'ts': time.time(),
+                    'duration': round(time.time() - cycle_start, 2),
+                    'total_signals': len(all_signals),
+                    'decoded_signals': decoded_count,
+                    'freqs': freq_results,
+                    'new_signals': [{'fp': s['fp'], 'freq': s['freq'], 'label': s['label']} for s in new_signals],
+                    'total_unique': len(signal_db),
+                    'top_signals': get_top_signals(10),
+                    'protocol_stats': get_protocol_stats(),
+                }
+
+                data_queue.put(cycle_data)
+
+                new_str = f" +{len(new_signals)} NEW" if new_signals else ""
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] C{cycle}: "
+                      f"{len(all_signals)} signals ({decoded_count} decoded), "
+                      f"{len(signal_db)} unique{new_str}")
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            print(f"Capture loop error: {msg}")
+            data_queue.put({'type': 'error', 'msg': msg, 'ts': time.time()})
+            data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+            time.sleep(1.0)
 
 
 def get_top_signals(limit=10):
@@ -595,16 +837,15 @@ async def ws_handler(websocket, path=None):
         print(f"Client disconnected ({len(clients)})")
 
 
-def http_thread():
+def http_thread(config: AppConfig):
     """HTTP server."""
-    import os
-    os.chdir('/tmp/flipper_explore')
 
     class QuietHandler(SimpleHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-    HTTPServer(('localhost', HTTP_PORT), QuietHandler).serve_forever()
+    handler = partial(QuietHandler, directory=str(config.work_dir))
+    HTTPServer(('localhost', config.http_port), handler).serve_forever()
 
 
 # ============ DASHBOARD HTML ============
@@ -621,8 +862,9 @@ header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:c
 h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
 .status{display:flex;gap:20px;font-size:11px;color:var(--dim)}
 .status span{display:flex;align-items:center;gap:4px}
-.dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--dim);transition:background .2s, box-shadow .2s}
 .dot.live{background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.error{background:var(--red);box-shadow:0 0 8px var(--red)}
 .main{display:flex;flex-direction:column;gap:1px;background:var(--border);overflow-y:auto}
 .sidebar{display:flex;flex-direction:column;gap:1px;background:var(--border);overflow-y:auto}
 .panel{background:var(--surface);padding:12px}
@@ -631,7 +873,7 @@ h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
 .freq-card{background:var(--surface2);border-radius:4px;padding:8px;text-align:center;border:1px solid transparent;transition:border-color .2s}
 .freq-card.active{border-color:var(--green)}
 .freq-label{font-size:10px;color:var(--dim)}
-.freq-value{font-size:22px;font-weight:700;font-family:inherit}
+.freq-value{font-size:22px;font-weight:700;font-family:inherit;transition:color .25s ease}
 .freq-bar{height:2px;background:var(--border);border-radius:1px;margin-top:6px;overflow:hidden}
 .freq-fill{height:100%;transition:width .3s}
 .freq-protos{font-size:9px;color:var(--dim);margin-top:4px;min-height:14px}
@@ -658,14 +900,14 @@ h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
 .signal-count{font-size:12px;font-weight:600}
 .signal-age{font-size:9px;color:var(--dim)}
 .mini-hist{display:flex;gap:1px;height:14px;margin-top:4px}
-.mini-hist span{flex:1;background:var(--purple);border-radius:1px;align-self:flex-end;min-width:3px}
+.mini-hist span{flex:1;background:var(--purple);border-radius:1px;align-self:flex-end;min-width:3px;transition:height .25s ease}
 .protocol-breakdown{margin-top:8px}
 .proto-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)}
 .proto-row:last-child{border:none}
 .proto-icon{font-size:14px;width:20px}
 .proto-name{flex:1;font-size:11px}
 .proto-bar{width:100px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
-.proto-fill{height:100%;background:var(--blue)}
+.proto-fill{height:100%;background:var(--blue);transition:width .3s ease}
 .proto-count{font-size:11px;color:var(--dim);min-width:30px;text-align:right}
 .log{font-size:10px;max-height:120px;overflow-y:auto;background:var(--bg);border-radius:4px;padding:6px;margin-top:8px}
 .log-entry{padding:2px 0;border-bottom:1px solid var(--border);display:flex;gap:8px}
@@ -715,40 +957,166 @@ h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
 </div>
 </div>
 <script>
-const WS='ws://localhost:8766';
-let ws,freq={},hist=[],maxSig=1,totalDecoded=0;
-const colors={315:'#3fb950',433.92:'#58a6ff',868:'#d29922',915:'#f85149'};
-const freqs=[315,433.92,868,915];
+const WS_PORT=__WS_PORT__;
+const WS_URL=`${location.protocol==='https:'?'wss':'ws'}://${location.hostname}:${WS_PORT}`;
+
+let ws;
+const freqs=__FREQS__;
+const baseColors={315:'#3fb950',433.92:'#58a6ff',868:'#d29922',915:'#f85149'};
+const palette=['#3fb950','#58a6ff','#d29922','#f85149','#56d4dd','#a371f7','#f0883e'];
+const colors={};
+freqs.forEach((f,i)=>{colors[f]=baseColors[f]||palette[i%palette.length]});
 const protoColors={princeton:'#3fb950',came_12bit:'#58a6ff',nice_flo:'#d29922',keeloq:'#f85149',oregon_v2:'#56d4dd',smart_meter:'#f0883e',tpms:'#a371f7',fixed_code:'#8b949e',unknown:'#6e7681'};
+const protoIcons={princeton:'🚗',came_12bit:'🚧',nice_flo:'🚧',keeloq:'🔐',oregon_v2:'🌡️',smart_meter:'⚡',tpms:'🛞',fixed_code:'📻',fsk_signal:'📶',slow_signal:'📡',complex_signal:'❓',ook_signal:'📻',unknown:'❓'};
+
+const state={freq:{},hist:[],maxSig:1,pending:[],renderScheduled:false,signalsReady:false,protocolsReady:false};
+
+const el={
+dot:document.getElementById('dot'),
+conn:document.getElementById('conn'),
+cycle:document.getElementById('cycle'),
+unique:document.getElementById('unique'),
+decoded:document.getElementById('decoded'),
+freqGrid:document.getElementById('freqGrid'),
+wave:document.getElementById('wave'),
+waveMeta:document.getElementById('waveMeta'),
+waveLabel:document.getElementById('waveLabel'),
+timeline:document.getElementById('timeline'),
+log:document.getElementById('log'),
+signals:document.getElementById('signals'),
+sigCount:document.getElementById('sigCount'),
+protocols:document.getElementById('protocols'),
+};
+
+const freqEls={};
+const signalEls=new Map();
+const protocolEls=new Map();
+let wavePath=null;
+
+function setConn(text,live,error){
+el.dot.classList.toggle('live',!!live);
+el.dot.classList.toggle('error',!!error);
+el.conn.textContent=text;
+}
 
 function connect(){
-ws=new WebSocket(WS);
-ws.onopen=()=>{$('dot').classList.add('live');$('conn').textContent='Live'};
-ws.onclose=()=>{$('dot').classList.remove('live');$('conn').textContent='Reconnecting';setTimeout(connect,1000)};
-ws.onmessage=e=>handle(JSON.parse(e.data));
+ws=new WebSocket(WS_URL);
+ws.onopen=()=>setConn('Live',true,false);
+ws.onclose=()=>{setConn('Reconnecting',false,false);setTimeout(connect,1000)};
+ws.onmessage=e=>enqueue(e.data);
 }
 
-function $(id){return document.getElementById(id)}
-function handle(m){
-if(m.type==='freq')updateFreq(m.data);
-else if(m.type==='cycle')updateCycle(m);
-else if(m.type==='init'){renderSignals(m.top_signals);renderProtocols(m.protocol_stats)}
+function enqueue(raw){
+try{state.pending.push(JSON.parse(raw))}catch{return}
+if(!state.renderScheduled){
+state.renderScheduled=true;
+requestAnimationFrame(flush);
+}
 }
 
-function updateFreq(d){
-freq[d.freq]=d;
-maxSig=Math.max(maxSig,...Object.values(freq).map(f=>f.n_signals||0),1);
-renderFreqGrid();
+function flush(){
+state.renderScheduled=false;
+while(state.pending.length)applyMessage(state.pending.shift());
+}
+
+function applyMessage(m){
+if(m.type==='freq')handleFreq(m.data);
+else if(m.type==='cycle')handleCycle(m);
+else if(m.type==='init'){renderSignals(m.top_signals);renderProtocols(m.protocol_stats);if(typeof m.total_unique==='number')el.unique.textContent=m.total_unique+' unique'}
+else if(m.type==='status')handleStatus(m);
+else if(m.type==='error')handleError(m);
+}
+
+function handleStatus(m){
+if(m.connected===false)setConn('Flipper offline',true,true);
+else if(m.connected===true)setConn(m.mock?'Mock':'Flipper',true,false);
+}
+
+function showToast(text,color){
+const a=document.createElement('div');
+a.className='alert';
+if(color)a.style.background=color;
+a.textContent=text;
+document.body.appendChild(a);
+setTimeout(()=>a.remove(),3500);
+}
+
+function handleError(m){
+setConn('Error',true,true);
+showToast('ERROR: '+(m.msg||'Unknown error'),'var(--red)');
+addLog({ts:m.ts||Date.now()/1000,total_signals:0,decoded_signals:0,new_signals:[],_msg:(m.msg||'')});
+}
+
+function buildFreqGrid(){
+freqs.forEach(f=>{
+const card=document.createElement('div');
+card.className='freq-card';
+const label=document.createElement('div');
+label.className='freq-label';
+label.textContent=f+' MHz';
+const value=document.createElement('div');
+value.className='freq-value';
+value.textContent='0';
+value.style.color='var(--dim)';
+const bar=document.createElement('div');
+bar.className='freq-bar';
+const fill=document.createElement('div');
+fill.className='freq-fill';
+fill.style.width='0%';
+fill.style.background=colors[f]||'var(--dim)';
+bar.appendChild(fill);
+const protos=document.createElement('div');
+protos.className='freq-protos';
+protos.textContent='--';
+card.appendChild(label);
+card.appendChild(value);
+card.appendChild(bar);
+card.appendChild(protos);
+el.freqGrid.appendChild(card);
+freqEls[f]={card,value,fill,protos};
+});
+}
+
+function buildWave(){
+const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+svg.setAttribute('viewBox','0 0 400 80');
+svg.setAttribute('preserveAspectRatio','none');
+wavePath=document.createElementNS('http://www.w3.org/2000/svg','path');
+svg.appendChild(wavePath);
+el.wave.appendChild(svg);
+}
+
+function handleFreq(d){
+state.freq[d.freq]=d;
+const newMax=Math.max(1,...Object.values(state.freq).map(f=>f.n_signals||0));
+const maxChanged=newMax!==state.maxSig;
+state.maxSig=newMax;
+if(maxChanged)freqs.forEach(f=>updateFreqCard(f,state.freq[f]||{freq:f,n_signals:0,protocols:{}}));
+else updateFreqCard(d.freq,d);
 if(d.best_signal&&d.best_signal.timings)renderWave(d.best_signal);
 }
 
-function updateCycle(d){
-$('cycle').textContent='C'+d.cycle+' ('+d.duration+'s)';
-$('unique').textContent=d.total_unique+' unique';
-totalDecoded+=d.decoded_signals;
-$('decoded').textContent=d.decoded_signals+'/'+d.total_signals+' decoded';
-hist.push({ts:d.ts,n:d.total_signals,decoded:d.decoded_signals});
-if(hist.length>80)hist.shift();
+function updateFreqCard(freqMhz,d){
+const els=freqEls[freqMhz];
+if(!els)return;
+const n=d.n_signals||0;
+const pct=Math.min((n/state.maxSig)*100,100);
+const c=colors[freqMhz]||'var(--green)';
+els.card.classList.toggle('active',n>0);
+els.value.textContent=String(n);
+els.value.style.color=n>0?c:'var(--dim)';
+els.fill.style.width=pct+'%';
+els.fill.style.background=c;
+const protos=Object.entries(d.protocols||{}).slice(0,2).map(([p])=>p.replace(/_/g,' ')).join(', ');
+els.protos.textContent=protos||'--';
+}
+
+function handleCycle(d){
+el.cycle.textContent='C'+d.cycle+' ('+d.duration+'s)';
+el.unique.textContent=d.total_unique+' unique';
+el.decoded.textContent=d.decoded_signals+'/'+d.total_signals+' decoded';
+state.hist.push({ts:d.ts,n:d.total_signals,decoded:d.decoded_signals});
+if(state.hist.length>80)state.hist.shift();
 renderTimeline();
 renderSignals(d.top_signals);
 renderProtocols(d.protocol_stats);
@@ -756,33 +1124,26 @@ addLog(d);
 if(d.new_signals&&d.new_signals.length)showAlerts(d.new_signals);
 }
 
-function renderFreqGrid(){
-$('freqGrid').innerHTML=freqs.map(f=>{
-const d=freq[f]||{n_signals:0,protocols:{}};
-const pct=Math.min((d.n_signals/maxSig)*100,100);
-const c=colors[f];
-const protos=Object.entries(d.protocols||{}).slice(0,2).map(([p,n])=>p.replace('_',' ')).join(', ')||'--';
-return '<div class="freq-card'+(d.n_signals>0?' active':'')+'"><div class="freq-label">'+f+' MHz</div><div class="freq-value" style="color:'+(d.n_signals?c:'var(--dim)')+'">'+(d.n_signals||0)+'</div><div class="freq-bar"><div class="freq-fill" style="width:'+pct+'%;background:'+c+'"></div></div><div class="freq-protos">'+protos+'</div></div>';
-}).join('');
-}
-
 function renderWave(sig){
-const c=$('wave'),t=sig.timings;
-if(!t||t.length<4)return;
-$('waveLabel').textContent=sig.label||'Signal';
-$('waveMeta').textContent=sig.freq+' MHz · '+sig.n_pulses+' pulses · '+sig.duration_ms+'ms';
-const w=c.clientWidth,h=80,p=8;
+const t=sig.timings;
+if(!t||t.length<4||!wavePath)return;
+el.waveLabel.textContent=sig.label||'Signal';
+el.waveMeta.textContent=sig.freq+' MHz · '+sig.n_pulses+' pulses · '+sig.duration_ms+'ms';
+const w=400,h=80,p=8;
 const xs=(w-p*2)/Math.min(t.length,80);
-let path='M '+p+' '+h/2,x=p;
-t.slice(0,80).forEach(v=>{const y=v>0?p:h-p;path+=' L '+x+' '+y;x+=xs;path+=' L '+x+' '+y});
+let x=p;
+let d='M '+p+' '+(h/2);
+t.slice(0,80).forEach(v=>{const y=v>0?p:h-p;d+=' L '+x+' '+y;x+=xs;d+=' L '+x+' '+y});
 const col=colors[sig.freq]||'var(--green)';
-c.innerHTML='<svg viewBox="0 0 '+w+' '+h+'"><path d="'+path+'" style="stroke:'+col+'"/></svg><div class="wave-label">'+$('waveLabel').textContent+'</div>';
+wavePath.setAttribute('d',d);
+wavePath.setAttribute('style','fill:none;stroke-width:1.5;stroke:'+col);
 }
 
 function renderTimeline(){
-const c=$('timeline');
-if(hist.length<2)return;
-const w=c.clientWidth,h=100,p={t:10,r:10,b:20,l:30};
+const c=el.timeline;
+const hist=state.hist;
+if(hist.length<2){c.innerHTML='';return}
+const w=c.clientWidth||400,h=100,p={t:10,r:10,b:20,l:30};
 const maxV=Math.max(...hist.map(h=>h.n),1);
 const xs=(w-p.l-p.r)/(hist.length-1),ys=(h-p.t-p.b)/maxV;
 let line='',dline='';
@@ -792,42 +1153,197 @@ line+=(i===0?'M':'L')+' '+x+' '+y;
 dline+=(i===0?'M':'L')+' '+x+' '+dy;
 });
 const area=line+' L '+(p.l+(hist.length-1)*xs)+' '+(h-p.b)+' L '+p.l+' '+(h-p.b)+' Z';
-c.innerHTML='<svg viewBox="0 0 '+w+' '+h+'"><path d="'+area+'" fill="var(--green)" opacity=".1"/><path d="'+line+'" fill="none" stroke="var(--green)" stroke-width="1.5"/><path d="'+dline+'" fill="none" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="3,2"/><text x="'+(p.l-4)+'" y="'+(p.t+4)+'" fill="var(--dim)" font-size="9" text-anchor="end">'+maxV+'</text><text x="'+(w-p.r)+'" y="'+(h-4)+'" fill="var(--dim)" font-size="9" text-anchor="end">signals / decoded</text></svg>';
+c.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none"><path d="'+area+'" fill="var(--green)" opacity=".1"/><path d="'+line+'" fill="none" stroke="var(--green)" stroke-width="1.5"/><path d="'+dline+'" fill="none" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="3,2"/><text x="'+(p.l-4)+'" y="'+(p.t+4)+'" fill="var(--dim)" font-size="9" text-anchor="end">'+maxV+'</text><text x="'+(w-p.r)+'" y="'+(h-4)+'" fill="var(--dim)" font-size="9" text-anchor="end">signals / decoded</text></svg>';
 }
 
 function renderSignals(sigs){
-if(!sigs||!sigs.length){$('signals').innerHTML='<div style="color:var(--dim);padding:12px">Waiting for signals...</div>';return}
-$('sigCount').textContent=sigs.length+' active';
-const now=Date.now()/1000;
-$('signals').innerHTML=sigs.map(s=>{
-const age=now-(s.ts||now);
-const ageStr=age<60?Math.round(age)+'s':Math.round(age/60)+'m';
-const isNew=age<5;
+if(!sigs||!sigs.length){
+state.signalsReady=false;
+el.sigCount.textContent='';
+el.signals.innerHTML='<div style="color:var(--dim);padding:12px">Waiting for signals...</div>';
+signalEls.clear();
+return;
+}
+
+if(!state.signalsReady){
+state.signalsReady=true;
+el.signals.textContent='';
+}
+
+el.sigCount.textContent=sigs.length+' active';
+const seen=new Set();
+sigs.forEach(s=>{
+if(!s||!s.fp)return;
+seen.add(s.fp);
+const node=upsertSignal(s);
+el.signals.appendChild(node);
+});
+
+[...signalEls.entries()].forEach(([fp,parts])=>{
+if(!seen.has(fp)){
+parts.root.remove();
+signalEls.delete(fp);
+}
+});
+updateSignalAges();
+}
+
+function upsertSignal(s){
+let parts=signalEls.get(s.fp);
+if(!parts){
+const root=document.createElement('div');
+root.className='signal-item';
+root.dataset.fp=s.fp;
+
+const icon=document.createElement('div');
+icon.className='signal-icon';
+
+const info=document.createElement('div');
+info.className='signal-info';
+
+const label=document.createElement('div');
+label.className='signal-label';
+
+const meta=document.createElement('div');
+meta.className='signal-meta';
+const fpEl=document.createElement('span');
+fpEl.className='signal-fp';
+const freqEl=document.createElement('span');
+const pulsesEl=document.createElement('span');
+meta.appendChild(fpEl);
+meta.appendChild(freqEl);
+meta.appendChild(pulsesEl);
+
+const mini=document.createElement('div');
+mini.className='mini-hist';
+const bars=[];
+for(let i=0;i<8;i++){
+const b=document.createElement('span');
+b.style.height='10%';
+mini.appendChild(b);
+bars.push(b);
+}
+
+info.appendChild(label);
+info.appendChild(meta);
+info.appendChild(mini);
+
+const stats=document.createElement('div');
+stats.className='signal-stats';
+const count=document.createElement('div');
+count.className='signal-count';
+const age=document.createElement('div');
+age.className='signal-age';
+stats.appendChild(count);
+stats.appendChild(age);
+
+root.appendChild(icon);
+root.appendChild(info);
+root.appendChild(stats);
+
+parts={root,icon,label,fpEl,freqEl,pulsesEl,count,age,bars};
+signalEls.set(s.fp,parts);
+}
+updateSignal(parts,s);
+return parts.root;
+}
+
+function updateSignal(parts,s){
 const proto=s.protocol||{};
+parts.icon.textContent=proto.icon||'📻';
+parts.label.textContent=s.label||'Unknown';
+parts.fpEl.textContent=s.fp;
+parts.freqEl.textContent=(s.freq||'--')+' MHz';
+parts.pulsesEl.textContent=(s.n_pulses||'--')+' pulses';
+parts.root.dataset.ts=s.ts||'';
+parts.count.textContent='×'+(s.count||1);
+
 const hist=s.histogram||[];
 const maxH=Math.max(...hist,1);
-return '<div class="signal-item'+(isNew?' new':'')+'"><div class="signal-icon">'+(proto.icon||'📻')+'</div><div class="signal-info"><div class="signal-label">'+(s.label||'Unknown')+'</div><div class="signal-meta"><span class="signal-fp">'+s.fp+'</span><span>'+s.freq+' MHz</span><span>'+(s.n_pulses||'--')+' pulses</span></div><div class="mini-hist">'+hist.map(v=>'<span style="height:'+((v/maxH)*100)+'%"></span>').join('')+'</div></div><div class="signal-stats"><div class="signal-count">×'+(s.count||1)+'</div><div class="signal-age">'+ageStr+'</div></div></div>';
-}).join('');
+for(let i=0;i<parts.bars.length;i++){
+const v=hist[i]||0;
+parts.bars[i].style.height=((v/maxH)*100)+'%';
+}
+}
+
+function updateSignalAges(){
+const now=Date.now()/1000;
+signalEls.forEach(parts=>{
+const ts=parseFloat(parts.root.dataset.ts||'0');
+if(!ts)return;
+const age=now-ts;
+parts.age.textContent=age<60?Math.round(age)+'s':Math.round(age/60)+'m';
+parts.root.classList.toggle('new',age<5);
+});
 }
 
 function renderProtocols(stats){
-if(!stats||!Object.keys(stats).length){$('protocols').innerHTML='<div style="color:var(--dim);padding:8px">No protocols detected</div>';return}
-const total=Object.values(stats).reduce((a,b)=>a+b,0);
-const icons={princeton:'🚗',came_12bit:'🚧',nice_flo:'🚧',keeloq:'🔐',oregon_v2:'🌡️',smart_meter:'⚡',tpms:'🛞',fixed_code:'📻',fsk_signal:'📶',slow_signal:'📡',complex_signal:'❓',ook_signal:'📻',unknown:'❓'};
-$('protocols').innerHTML=Object.entries(stats).map(([p,n])=>{
+const container=el.protocols;
+if(!stats||!Object.keys(stats).length){
+state.protocolsReady=false;
+container.innerHTML='<div style="color:var(--dim);padding:8px">No protocols detected</div>';
+protocolEls.clear();
+return;
+}
+
+if(!state.protocolsReady){
+state.protocolsReady=true;
+container.textContent='';
+}
+
+const total=Object.values(stats).reduce((a,b)=>a+b,0)||1;
+const entries=Object.entries(stats);
+const seen=new Set();
+entries.forEach(([p,n])=>{
+seen.add(p);
+let row=protocolEls.get(p);
+if(!row){
+const root=document.createElement('div');
+root.className='proto-row';
+const icon=document.createElement('div');
+icon.className='proto-icon';
+icon.textContent=protoIcons[p]||'📻';
+const name=document.createElement('div');
+name.className='proto-name';
+name.textContent=p.replace(/_/g,' ');
+const bar=document.createElement('div');
+bar.className='proto-bar';
+const fill=document.createElement('div');
+fill.className='proto-fill';
+bar.appendChild(fill);
+const count=document.createElement('div');
+count.className='proto-count';
+root.appendChild(icon);
+root.appendChild(name);
+root.appendChild(bar);
+root.appendChild(count);
+row={root,fill,count};
+protocolEls.set(p,row);
+}
 const pct=(n/total)*100;
-return '<div class="proto-row"><div class="proto-icon">'+(icons[p]||'📻')+'</div><div class="proto-name">'+p.replace(/_/g,' ')+'</div><div class="proto-bar"><div class="proto-fill" style="width:'+pct+'%;background:'+(protoColors[p]||'var(--blue)')+'"></div></div><div class="proto-count">'+n+'</div></div>';
-}).join('');
+row.fill.style.width=pct+'%';
+row.fill.style.background=protoColors[p]||'var(--blue)';
+row.count.textContent=String(n);
+container.appendChild(row.root);
+});
+
+[...protocolEls.entries()].forEach(([p,row])=>{
+if(!seen.has(p)){
+row.root.remove();
+protocolEls.delete(p);
+}
+});
 }
 
 function addLog(d){
-const l=$('log');
-const ts=new Date(d.ts*1000).toLocaleTimeString();
+const l=el.log;
+const ts=new Date((d.ts||Date.now()/1000)*1000).toLocaleTimeString();
 const newSigs=d.new_signals||[];
-const newStr=newSigs.length?' <span class="log-new">+'+newSigs.length+' NEW ('+newSigs.map(s=>s.label.split(' ')[0]).join(', ')+')</span>':'';
+const newStr=newSigs.length?' <span class="log-new">+'+newSigs.length+' NEW</span>':'';
+const msg=d._msg?' '+String(d._msg):'';
 const e=document.createElement('div');
 e.className='log-entry';
-e.innerHTML='<span class="log-ts">'+ts+'</span><span>'+d.total_signals+' sig ('+d.decoded_signals+' decoded)'+newStr+'</span>';
+e.innerHTML='<span class="log-ts">'+ts+'</span><span>'+(d.total_signals||0)+' sig ('+(d.decoded_signals||0)+' decoded)'+newStr+msg+'</span>';
 l.insertBefore(e,l.firstChild);
 while(l.children.length>40)l.removeChild(l.lastChild);
 }
@@ -845,9 +1361,11 @@ setTimeout(()=>a.remove(),3000);
 });
 }
 
-renderFreqGrid();
+buildFreqGrid();
+buildWave();
 connect();
-window.onresize=renderTimeline;
+setInterval(updateSignalAges,1000);
+window.addEventListener('resize',renderTimeline);
 </script></body></html>'''
 
 
@@ -856,17 +1374,26 @@ async def main():
     print("RF Decode - Protocol Classification")
     print("=" * 50)
 
-    with open('/tmp/flipper_explore/decode.html', 'w') as f:
-        f.write(DASHBOARD)
+    config = build_config()
+    config.work_dir.mkdir(parents=True, exist_ok=True)
 
-    threading.Thread(target=http_thread, daemon=True).start()
-    threading.Thread(target=capture_thread, daemon=True).start()
+    (config.work_dir / 'decode.html').write_text(
+        DASHBOARD
+        .replace('__WS_PORT__', str(config.ws_port))
+        .replace('__FREQS__', json.dumps([hz_to_mhz(f) for f in config.freqs_hz])),
+        encoding='utf-8',
+    )
 
-    print(f"HTTP: http://localhost:{HTTP_PORT}/decode.html")
-    print(f"WebSocket: ws://localhost:{WS_PORT}")
+    threading.Thread(target=http_thread, args=(config,), daemon=True).start()
+    threading.Thread(target=capture_thread, args=(config,), daemon=True).start()
+
+    print(f"HTTP: http://localhost:{config.http_port}/decode.html")
+    print(f"WebSocket: ws://localhost:{config.ws_port}")
+    if config.mock:
+        print("Mode: mock (synthetic signals)")
     print("Press Ctrl+C to stop\n")
 
-    await websockets.serve(ws_handler, 'localhost', WS_PORT)
+    await websockets.serve(ws_handler, 'localhost', config.ws_port)
     await broadcast_loop()
 
 
