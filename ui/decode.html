@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RF Decode</title>
+  <link rel="stylesheet" href="decode.css" />
+  <script>
+    window.__RF_CONFIG__ = __CONFIG__;
+  </script>
+  <script defer src="decode.js"></script>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">📡</div>
+        <div class="titles">
+          <div class="title">RF Decode</div>
+          <div class="subtitle">protocol classification · fingerprinting · live spectrum</div>
+        </div>
+      </div>
+
+      <div class="hud">
+        <div class="hud-item">
+          <div class="dot" id="wsDot"></div>
+          <div class="hud-label" id="wsLabel">WS</div>
+          <div class="hud-value" id="wsStatus">connecting</div>
+        </div>
+        <div class="hud-item">
+          <div class="dot" id="srcDot"></div>
+          <div class="hud-label" id="srcLabel">src</div>
+          <div class="hud-value" id="srcStatus">--</div>
+        </div>
+        <div class="hud-item">
+          <div class="hud-label">cycle</div>
+          <div class="hud-value" id="cycleStatus">--</div>
+        </div>
+        <div class="hud-item">
+          <div class="hud-label">unique</div>
+          <div class="hud-value" id="uniqueStatus">0</div>
+        </div>
+        <div class="hud-item">
+          <div class="hud-label">decoded</div>
+          <div class="hud-value" id="decodedStatus">0/0</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="btn" id="pauseBtn" title="Pause updates (Space)">Pause</button>
+        <button class="btn" id="clearBtn" title="Clear event stream">Clear</button>
+        <button class="btn" id="helpBtn" title="Help (?)">?</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="col col-left">
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Bands</div>
+            <div class="panel-meta" id="bandMeta">--</div>
+          </div>
+          <div id="bandGrid" class="band-grid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Band Health</div>
+            <div class="panel-meta">60s window</div>
+          </div>
+          <div id="healthGrid" class="health-grid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Protocol Mix</div>
+            <div class="panel-meta" id="protoMeta">--</div>
+          </div>
+          <div id="protoList" class="proto-list"></div>
+        </section>
+      </aside>
+
+      <section class="col col-center">
+        <section class="panel panel-tall">
+          <div class="panel-header">
+            <div class="panel-title">Spectrum Waterfall</div>
+            <div class="panel-meta" id="waterfallMeta">--</div>
+          </div>
+          <div class="waterfall-wrap">
+            <canvas id="waterfall" class="waterfall"></canvas>
+            <div id="waterfallLegend" class="waterfall-legend"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Signal Inspector</div>
+            <div class="panel-meta" id="inspectMeta">click a signal</div>
+          </div>
+          <div class="inspect">
+            <div class="inspect-top">
+              <div class="inspect-label" id="inspectLabel">--</div>
+              <div class="inspect-badges" id="inspectBadges"></div>
+            </div>
+            <div class="inspect-grid">
+              <div class="inspect-pane">
+                <div class="inspect-sub">waveform</div>
+                <canvas id="waveCanvas" class="wave"></canvas>
+              </div>
+              <div class="inspect-pane">
+                <div class="inspect-sub">pulse histogram</div>
+                <div id="histogram" class="hist"></div>
+              </div>
+              <div class="inspect-pane inspect-pane-wide">
+                <div class="inspect-sub">derived stats</div>
+                <div id="inspectStats" class="kv"></div>
+              </div>
+              <div class="inspect-pane inspect-pane-wide">
+                <div class="inspect-sub">raw timings</div>
+                <pre id="timings" class="timings">--</pre>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="col col-right">
+        <section class="panel panel-tall">
+          <div class="panel-header">
+            <div class="panel-title">Event Stream</div>
+            <div class="panel-meta"><span id="eventMeta">--</span></div>
+          </div>
+          <div class="stream-controls">
+            <input id="filterInput" class="input" placeholder="filter: fp / protocol / label" />
+            <div class="stream-toggles">
+              <label class="toggle"><input id="onlyNewToggle" type="checkbox" /> <span>new</span></label>
+              <label class="toggle"><input id="onlyDecodedToggle" type="checkbox" checked /> <span>decoded</span></label>
+            </div>
+          </div>
+          <div id="eventStream" class="stream"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+  <div class="help" id="help" hidden>
+    <div class="help-card">
+      <div class="help-title">RF Decode — shortcuts</div>
+      <div class="help-grid">
+        <div class="help-k">Space</div><div class="help-v">pause/resume updates</div>
+        <div class="help-k">C</div><div class="help-v">clear event stream</div>
+        <div class="help-k">?</div><div class="help-v">toggle help</div>
+        <div class="help-k">Esc</div><div class="help-v">close help</div>
+        <div class="help-k">Click</div><div class="help-v">inspect a signal</div>
+      </div>
+      <div class="help-foot" id="helpFoot">--</div>
+    </div>
+  </div>
+</body>
+</html>
+

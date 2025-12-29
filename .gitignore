@@ -9,10 +9,6 @@ venv/
 # Scratch / experiments
 scratch/
 
-# Runtime generated
-*.json
-*.html
-
 # OS
 .DS_Store
 Thumbs.db

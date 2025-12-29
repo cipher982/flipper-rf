@@ -316,12 +316,17 @@ def analyze_timing_pattern(burst):
         gap_ratio = 0
 
     # Duration
-    duration_us = sum(abs(t) for t in burst)
+    on_total_us = sum(on_pulses)
+    off_total_us = sum(off_gaps) if off_gaps else 0
+    duration_us = on_total_us + off_total_us
+    on_duty = (on_total_us / duration_us * 100) if duration_us else 0
 
     return {
         'n_pulses': len(on_pulses),
         'n_transitions': len(burst),
         'duration_ms': round(duration_us / 1000, 1),
+        'on_duration_ms': round(on_total_us / 1000, 1),
+        'on_duty_cycle': round(on_duty, 1),
         'pulse_min': pulse_min,
         'pulse_max': pulse_max,
         'pulse_mean': pulse_mean,
@@ -521,6 +526,7 @@ def decode_timings(timings: list[int], freq_mhz: float) -> tuple[list[dict], lis
 
         # Track in database
         is_new = fp not in signal_db
+        signal['is_new'] = is_new
         if is_new:
             signal_db[fp] = {
                 'first_seen': ts,
@@ -534,6 +540,9 @@ def decode_timings(timings: list[int], freq_mhz: float) -> tuple[list[dict], lis
         else:
             signal_db[fp]['last_seen'] = ts
             signal_db[fp]['count'] += 1
+
+        signal['count'] = signal_db[fp]['count']
+        signal['first_seen'] = signal_db[fp]['first_seen']
 
         recent_signals.append(signal)
 
@@ -629,12 +638,18 @@ def capture_thread(config: AppConfig):
                 new_signals.extend(freq_new)
                 decoded_count += freq_decoded
 
+                for sig in freq_signals:
+                    data_queue.put({'type': 'signal', 'data': sig})
+
                 freq_results.append({
                     'freq': freq_mhz,
+                    'ts': time.time(),
                     'n_signals': len(freq_signals),
+                    'decoded_signals': freq_decoded,
                     'n_transitions': len(timings),
                     'protocols': build_proto_summary(freq_signals),
                     'best_signal': freq_signals[0] if freq_signals else None,
+                    'health': compute_band_health(freq_mhz),
                 })
 
                 data_queue.put({'type': 'freq', 'data': freq_results[-1]})
@@ -709,12 +724,18 @@ def capture_thread(config: AppConfig):
                     new_signals.extend(freq_new)
                     decoded_count += freq_decoded
 
+                    for sig in freq_signals:
+                        data_queue.put({'type': 'signal', 'data': sig})
+
                     freq_results.append({
                         'freq': freq_mhz,
+                        'ts': time.time(),
                         'n_signals': len(freq_signals),
+                        'decoded_signals': freq_decoded,
                         'n_transitions': len(timings),
                         'protocols': build_proto_summary(freq_signals),
                         'best_signal': freq_signals[0] if freq_signals else None,
+                        'health': compute_band_health(freq_mhz),
                     })
 
                     data_queue.put({'type': 'freq', 'data': freq_results[-1]})
@@ -790,6 +811,51 @@ def get_protocol_stats():
     return dict(sorted(proto_counts.items(), key=lambda x: -x[1])[:8])
 
 
+def compute_band_health(freq_mhz: float, window_sec: int = 60) -> dict[str, float | int]:
+    """Compute per-band health metrics over a rolling window."""
+    stats = band_stats[freq_mhz]
+    now = time.time()
+
+    recent = [s for s in stats['signals'] if now - s.get('ts', now) < window_sec]
+    if not recent:
+        return {
+            'signal_rate': 0.0,
+            'unique_per_min': 0,
+            'entropy': 0.0,
+            'duty_cycle': 0.0,
+        }
+
+    signal_rate = len(recent) / window_sec * 60  # per minute
+
+    fps = [s.get('fp') for s in recent if s.get('fp')]
+    unique_per_min = len(set(fps))
+
+    # Entropy of fingerprints (diversity)
+    fp_counts = defaultdict(int)
+    for fp in fps:
+        fp_counts[fp] += 1
+
+    total = sum(fp_counts.values())
+    entropy = 0.0
+    if total > 0:
+        import math
+        for count in fp_counts.values():
+            p = count / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+
+    # Duty cycle (approx: sum of on-time over the window)
+    on_total_ms = sum(float(s.get('on_duration_ms', 0) or 0) for s in recent)
+    duty_cycle = min(100.0, (on_total_ms / (window_sec * 1000)) * 100) if window_sec > 0 else 0.0
+
+    return {
+        'signal_rate': round(signal_rate, 1),
+        'unique_per_min': unique_per_min,
+        'entropy': round(entropy, 2),
+        'duty_cycle': round(duty_cycle, 1),
+    }
+
+
 async def broadcast_loop():
     """Broadcast to clients."""
     while True:
@@ -848,525 +914,29 @@ def http_thread(config: AppConfig):
     HTTPServer(('localhost', config.http_port), handler).serve_forever()
 
 
-# ============ DASHBOARD HTML ============
+# ============ UI Assets ============
 
-DASHBOARD = '''<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"><title>RF Decode</title>
-<style>
-:root{--bg:#0a0e14;--surface:#12171f;--surface2:#1a2029;--border:#2a3140;--text:#e6edf3;--dim:#6e7681;--green:#3fb950;--yellow:#d29922;--red:#f85149;--blue:#58a6ff;--purple:#a371f7;--cyan:#56d4dd;--orange:#f0883e}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'SF Mono',Consolas,monospace;background:var(--bg);color:var(--text);font-size:12px;overflow-x:hidden}
-.app{display:grid;grid-template-columns:1fr 380px;grid-template-rows:auto 1fr;height:100vh;gap:1px;background:var(--border)}
-header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;padding:10px 16px;background:var(--surface)}
-h1{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
-.status{display:flex;gap:20px;font-size:11px;color:var(--dim)}
-.status span{display:flex;align-items:center;gap:4px}
-.dot{width:6px;height:6px;border-radius:50%;background:var(--dim);transition:background .2s, box-shadow .2s}
-.dot.live{background:var(--green);box-shadow:0 0 8px var(--green)}
-.dot.error{background:var(--red);box-shadow:0 0 8px var(--red)}
-.main{display:flex;flex-direction:column;gap:1px;background:var(--border);overflow-y:auto}
-.sidebar{display:flex;flex-direction:column;gap:1px;background:var(--border);overflow-y:auto}
-.panel{background:var(--surface);padding:12px}
-.section{font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;justify-content:space-between}
-.freq-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
-.freq-card{background:var(--surface2);border-radius:4px;padding:8px;text-align:center;border:1px solid transparent;transition:border-color .2s}
-.freq-card.active{border-color:var(--green)}
-.freq-label{font-size:10px;color:var(--dim)}
-.freq-value{font-size:22px;font-weight:700;font-family:inherit;transition:color .25s ease}
-.freq-bar{height:2px;background:var(--border);border-radius:1px;margin-top:6px;overflow:hidden}
-.freq-fill{height:100%;transition:width .3s}
-.freq-protos{font-size:9px;color:var(--dim);margin-top:4px;min-height:14px}
-.proto-stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.proto-chip{background:var(--surface2);border-radius:3px;padding:3px 6px;font-size:10px;display:flex;align-items:center;gap:4px}
-.proto-chip .icon{font-size:12px}
-.proto-chip .count{color:var(--dim)}
-.wave-panel{height:80px;background:var(--bg);border-radius:4px;margin-top:8px;position:relative}
-.wave-panel svg{width:100%;height:100%}
-.wave-panel path{fill:none;stroke-width:1.5}
-.wave-label{position:absolute;top:4px;left:8px;font-size:9px;color:var(--dim);background:var(--bg);padding:2px 6px;border-radius:2px}
-.timeline{height:100px;background:var(--bg);border-radius:4px;margin-top:8px}
-.timeline svg{width:100%;height:100%}
-.signal-list{display:flex;flex-direction:column;gap:4px;max-height:400px;overflow-y:auto}
-.signal-item{background:var(--surface2);border-radius:4px;padding:8px 10px;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;border-left:3px solid transparent}
-.signal-item.new{border-left-color:var(--green);animation:flash .5s}
-@keyframes flash{0%,100%{background:var(--surface2)}50%{background:#3fb95020}}
-.signal-icon{font-size:16px;width:24px;text-align:center}
-.signal-info{display:flex;flex-direction:column;gap:2px}
-.signal-label{font-weight:500;font-size:11px}
-.signal-meta{font-size:9px;color:var(--dim);display:flex;gap:8px}
-.signal-fp{font-family:inherit;color:var(--blue)}
-.signal-stats{text-align:right}
-.signal-count{font-size:12px;font-weight:600}
-.signal-age{font-size:9px;color:var(--dim)}
-.mini-hist{display:flex;gap:1px;height:14px;margin-top:4px}
-.mini-hist span{flex:1;background:var(--purple);border-radius:1px;align-self:flex-end;min-width:3px;transition:height .25s ease}
-.protocol-breakdown{margin-top:8px}
-.proto-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)}
-.proto-row:last-child{border:none}
-.proto-icon{font-size:14px;width:20px}
-.proto-name{flex:1;font-size:11px}
-.proto-bar{width:100px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
-.proto-fill{height:100%;background:var(--blue);transition:width .3s ease}
-.proto-count{font-size:11px;color:var(--dim);min-width:30px;text-align:right}
-.log{font-size:10px;max-height:120px;overflow-y:auto;background:var(--bg);border-radius:4px;padding:6px;margin-top:8px}
-.log-entry{padding:2px 0;border-bottom:1px solid var(--border);display:flex;gap:8px}
-.log-ts{color:var(--dim);min-width:55px}
-.log-new{color:var(--green)}
-.alert{position:fixed;top:60px;right:16px;background:var(--green);color:var(--bg);padding:6px 12px;border-radius:4px;font-size:11px;font-weight:600;animation:slideIn .3s}
-@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
-</style></head><body>
-<div class="app">
-<header>
-<h1>📡 RF Decode</h1>
-<div class="status">
-<span><div class="dot" id="dot"></div><span id="conn">Connecting</span></span>
-<span id="cycle">--</span>
-<span id="unique">0 unique</span>
-<span id="decoded">0 decoded</span>
-</div>
-</header>
-<div class="main">
-<div class="panel">
-<div class="section">Frequency Bands</div>
-<div class="freq-grid" id="freqGrid"></div>
-<div class="proto-stats" id="protoStats"></div>
-</div>
-<div class="panel">
-<div class="section">Waveform<span id="waveMeta">--</span></div>
-<div class="wave-panel" id="wave"><div class="wave-label" id="waveLabel"></div></div>
-</div>
-<div class="panel">
-<div class="section">Activity Timeline</div>
-<div class="timeline" id="timeline"></div>
-</div>
-<div class="panel">
-<div class="section">Event Log</div>
-<div class="log" id="log"></div>
-</div>
-</div>
-<div class="sidebar">
-<div class="panel">
-<div class="section">Live Signals<span id="sigCount"></span></div>
-<div class="signal-list" id="signals"></div>
-</div>
-<div class="panel">
-<div class="section">Protocol Distribution</div>
-<div class="protocol-breakdown" id="protocols"></div>
-</div>
-</div>
-</div>
-<script>
-const WS_PORT=__WS_PORT__;
-const WS_URL=`${location.protocol==='https:'?'wss':'ws'}://${location.hostname}:${WS_PORT}`;
 
-let ws;
-const freqs=__FREQS__;
-const baseColors={315:'#3fb950',433.92:'#58a6ff',868:'#d29922',915:'#f85149'};
-const palette=['#3fb950','#58a6ff','#d29922','#f85149','#56d4dd','#a371f7','#f0883e'];
-const colors={};
-freqs.forEach((f,i)=>{colors[f]=baseColors[f]||palette[i%palette.length]});
-const protoColors={princeton:'#3fb950',came_12bit:'#58a6ff',nice_flo:'#d29922',keeloq:'#f85149',oregon_v2:'#56d4dd',smart_meter:'#f0883e',tpms:'#a371f7',fixed_code:'#8b949e',unknown:'#6e7681'};
-const protoIcons={princeton:'🚗',came_12bit:'🚧',nice_flo:'🚧',keeloq:'🔐',oregon_v2:'🌡️',smart_meter:'⚡',tpms:'🛞',fixed_code:'📻',fsk_signal:'📶',slow_signal:'📡',complex_signal:'❓',ook_signal:'📻',unknown:'❓'};
+def write_dashboard_files(config: AppConfig) -> None:
+    ui_dir = Path(__file__).resolve().parent / 'ui'
+    html_template = (ui_dir / 'decode.html').read_text(encoding='utf-8')
+    css = (ui_dir / 'decode.css').read_text(encoding='utf-8')
+    js = (ui_dir / 'decode.js').read_text(encoding='utf-8')
 
-const state={freq:{},hist:[],maxSig:1,pending:[],renderScheduled:false,signalsReady:false,protocolsReady:false};
+    ui_config = {
+        'ws_port': config.ws_port,
+        'http_port': config.http_port,
+        'freqs_mhz': [hz_to_mhz(f) for f in config.freqs_hz],
+        'capture_duration': config.capture_duration,
+        'work_dir': str(config.work_dir),
+        'mock': config.mock,
+    }
 
-const el={
-dot:document.getElementById('dot'),
-conn:document.getElementById('conn'),
-cycle:document.getElementById('cycle'),
-unique:document.getElementById('unique'),
-decoded:document.getElementById('decoded'),
-freqGrid:document.getElementById('freqGrid'),
-wave:document.getElementById('wave'),
-waveMeta:document.getElementById('waveMeta'),
-waveLabel:document.getElementById('waveLabel'),
-timeline:document.getElementById('timeline'),
-log:document.getElementById('log'),
-signals:document.getElementById('signals'),
-sigCount:document.getElementById('sigCount'),
-protocols:document.getElementById('protocols'),
-};
+    html = html_template.replace('__CONFIG__', json.dumps(ui_config))
 
-const freqEls={};
-const signalEls=new Map();
-const protocolEls=new Map();
-let wavePath=null;
-
-function setConn(text,live,error){
-el.dot.classList.toggle('live',!!live);
-el.dot.classList.toggle('error',!!error);
-el.conn.textContent=text;
-}
-
-function connect(){
-ws=new WebSocket(WS_URL);
-ws.onopen=()=>setConn('Live',true,false);
-ws.onclose=()=>{setConn('Reconnecting',false,false);setTimeout(connect,1000)};
-ws.onmessage=e=>enqueue(e.data);
-}
-
-function enqueue(raw){
-try{state.pending.push(JSON.parse(raw))}catch{return}
-if(!state.renderScheduled){
-state.renderScheduled=true;
-requestAnimationFrame(flush);
-}
-}
-
-function flush(){
-state.renderScheduled=false;
-while(state.pending.length)applyMessage(state.pending.shift());
-}
-
-function applyMessage(m){
-if(m.type==='freq')handleFreq(m.data);
-else if(m.type==='cycle')handleCycle(m);
-else if(m.type==='init'){renderSignals(m.top_signals);renderProtocols(m.protocol_stats);if(typeof m.total_unique==='number')el.unique.textContent=m.total_unique+' unique'}
-else if(m.type==='status')handleStatus(m);
-else if(m.type==='error')handleError(m);
-}
-
-function handleStatus(m){
-if(m.connected===false)setConn('Flipper offline',true,true);
-else if(m.connected===true)setConn(m.mock?'Mock':'Flipper',true,false);
-}
-
-function showToast(text,color){
-const a=document.createElement('div');
-a.className='alert';
-if(color)a.style.background=color;
-a.textContent=text;
-document.body.appendChild(a);
-setTimeout(()=>a.remove(),3500);
-}
-
-function handleError(m){
-setConn('Error',true,true);
-showToast('ERROR: '+(m.msg||'Unknown error'),'var(--red)');
-addLog({ts:m.ts||Date.now()/1000,total_signals:0,decoded_signals:0,new_signals:[],_msg:(m.msg||'')});
-}
-
-function buildFreqGrid(){
-freqs.forEach(f=>{
-const card=document.createElement('div');
-card.className='freq-card';
-const label=document.createElement('div');
-label.className='freq-label';
-label.textContent=f+' MHz';
-const value=document.createElement('div');
-value.className='freq-value';
-value.textContent='0';
-value.style.color='var(--dim)';
-const bar=document.createElement('div');
-bar.className='freq-bar';
-const fill=document.createElement('div');
-fill.className='freq-fill';
-fill.style.width='0%';
-fill.style.background=colors[f]||'var(--dim)';
-bar.appendChild(fill);
-const protos=document.createElement('div');
-protos.className='freq-protos';
-protos.textContent='--';
-card.appendChild(label);
-card.appendChild(value);
-card.appendChild(bar);
-card.appendChild(protos);
-el.freqGrid.appendChild(card);
-freqEls[f]={card,value,fill,protos};
-});
-}
-
-function buildWave(){
-const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
-svg.setAttribute('viewBox','0 0 400 80');
-svg.setAttribute('preserveAspectRatio','none');
-wavePath=document.createElementNS('http://www.w3.org/2000/svg','path');
-svg.appendChild(wavePath);
-el.wave.appendChild(svg);
-}
-
-function handleFreq(d){
-state.freq[d.freq]=d;
-const newMax=Math.max(1,...Object.values(state.freq).map(f=>f.n_signals||0));
-const maxChanged=newMax!==state.maxSig;
-state.maxSig=newMax;
-if(maxChanged)freqs.forEach(f=>updateFreqCard(f,state.freq[f]||{freq:f,n_signals:0,protocols:{}}));
-else updateFreqCard(d.freq,d);
-if(d.best_signal&&d.best_signal.timings)renderWave(d.best_signal);
-}
-
-function updateFreqCard(freqMhz,d){
-const els=freqEls[freqMhz];
-if(!els)return;
-const n=d.n_signals||0;
-const pct=Math.min((n/state.maxSig)*100,100);
-const c=colors[freqMhz]||'var(--green)';
-els.card.classList.toggle('active',n>0);
-els.value.textContent=String(n);
-els.value.style.color=n>0?c:'var(--dim)';
-els.fill.style.width=pct+'%';
-els.fill.style.background=c;
-const protos=Object.entries(d.protocols||{}).slice(0,2).map(([p])=>p.replace(/_/g,' ')).join(', ');
-els.protos.textContent=protos||'--';
-}
-
-function handleCycle(d){
-el.cycle.textContent='C'+d.cycle+' ('+d.duration+'s)';
-el.unique.textContent=d.total_unique+' unique';
-el.decoded.textContent=d.decoded_signals+'/'+d.total_signals+' decoded';
-state.hist.push({ts:d.ts,n:d.total_signals,decoded:d.decoded_signals});
-if(state.hist.length>80)state.hist.shift();
-renderTimeline();
-renderSignals(d.top_signals);
-renderProtocols(d.protocol_stats);
-addLog(d);
-if(d.new_signals&&d.new_signals.length)showAlerts(d.new_signals);
-}
-
-function renderWave(sig){
-const t=sig.timings;
-if(!t||t.length<4||!wavePath)return;
-el.waveLabel.textContent=sig.label||'Signal';
-el.waveMeta.textContent=sig.freq+' MHz · '+sig.n_pulses+' pulses · '+sig.duration_ms+'ms';
-const w=400,h=80,p=8;
-const xs=(w-p*2)/Math.min(t.length,80);
-let x=p;
-let d='M '+p+' '+(h/2);
-t.slice(0,80).forEach(v=>{const y=v>0?p:h-p;d+=' L '+x+' '+y;x+=xs;d+=' L '+x+' '+y});
-const col=colors[sig.freq]||'var(--green)';
-wavePath.setAttribute('d',d);
-wavePath.setAttribute('style','fill:none;stroke-width:1.5;stroke:'+col);
-}
-
-function renderTimeline(){
-const c=el.timeline;
-const hist=state.hist;
-if(hist.length<2){c.innerHTML='';return}
-const w=c.clientWidth||400,h=100,p={t:10,r:10,b:20,l:30};
-const maxV=Math.max(...hist.map(h=>h.n),1);
-const xs=(w-p.l-p.r)/(hist.length-1),ys=(h-p.t-p.b)/maxV;
-let line='',dline='';
-hist.forEach((pt,i)=>{
-const x=p.l+i*xs,y=h-p.b-pt.n*ys,dy=h-p.b-pt.decoded*ys;
-line+=(i===0?'M':'L')+' '+x+' '+y;
-dline+=(i===0?'M':'L')+' '+x+' '+dy;
-});
-const area=line+' L '+(p.l+(hist.length-1)*xs)+' '+(h-p.b)+' L '+p.l+' '+(h-p.b)+' Z';
-c.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none"><path d="'+area+'" fill="var(--green)" opacity=".1"/><path d="'+line+'" fill="none" stroke="var(--green)" stroke-width="1.5"/><path d="'+dline+'" fill="none" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="3,2"/><text x="'+(p.l-4)+'" y="'+(p.t+4)+'" fill="var(--dim)" font-size="9" text-anchor="end">'+maxV+'</text><text x="'+(w-p.r)+'" y="'+(h-4)+'" fill="var(--dim)" font-size="9" text-anchor="end">signals / decoded</text></svg>';
-}
-
-function renderSignals(sigs){
-if(!sigs||!sigs.length){
-state.signalsReady=false;
-el.sigCount.textContent='';
-el.signals.innerHTML='<div style="color:var(--dim);padding:12px">Waiting for signals...</div>';
-signalEls.clear();
-return;
-}
-
-if(!state.signalsReady){
-state.signalsReady=true;
-el.signals.textContent='';
-}
-
-el.sigCount.textContent=sigs.length+' active';
-const seen=new Set();
-sigs.forEach(s=>{
-if(!s||!s.fp)return;
-seen.add(s.fp);
-const node=upsertSignal(s);
-el.signals.appendChild(node);
-});
-
-[...signalEls.entries()].forEach(([fp,parts])=>{
-if(!seen.has(fp)){
-parts.root.remove();
-signalEls.delete(fp);
-}
-});
-updateSignalAges();
-}
-
-function upsertSignal(s){
-let parts=signalEls.get(s.fp);
-if(!parts){
-const root=document.createElement('div');
-root.className='signal-item';
-root.dataset.fp=s.fp;
-
-const icon=document.createElement('div');
-icon.className='signal-icon';
-
-const info=document.createElement('div');
-info.className='signal-info';
-
-const label=document.createElement('div');
-label.className='signal-label';
-
-const meta=document.createElement('div');
-meta.className='signal-meta';
-const fpEl=document.createElement('span');
-fpEl.className='signal-fp';
-const freqEl=document.createElement('span');
-const pulsesEl=document.createElement('span');
-meta.appendChild(fpEl);
-meta.appendChild(freqEl);
-meta.appendChild(pulsesEl);
-
-const mini=document.createElement('div');
-mini.className='mini-hist';
-const bars=[];
-for(let i=0;i<8;i++){
-const b=document.createElement('span');
-b.style.height='10%';
-mini.appendChild(b);
-bars.push(b);
-}
-
-info.appendChild(label);
-info.appendChild(meta);
-info.appendChild(mini);
-
-const stats=document.createElement('div');
-stats.className='signal-stats';
-const count=document.createElement('div');
-count.className='signal-count';
-const age=document.createElement('div');
-age.className='signal-age';
-stats.appendChild(count);
-stats.appendChild(age);
-
-root.appendChild(icon);
-root.appendChild(info);
-root.appendChild(stats);
-
-parts={root,icon,label,fpEl,freqEl,pulsesEl,count,age,bars};
-signalEls.set(s.fp,parts);
-}
-updateSignal(parts,s);
-return parts.root;
-}
-
-function updateSignal(parts,s){
-const proto=s.protocol||{};
-parts.icon.textContent=proto.icon||'📻';
-parts.label.textContent=s.label||'Unknown';
-parts.fpEl.textContent=s.fp;
-parts.freqEl.textContent=(s.freq||'--')+' MHz';
-parts.pulsesEl.textContent=(s.n_pulses||'--')+' pulses';
-parts.root.dataset.ts=s.ts||'';
-parts.count.textContent='×'+(s.count||1);
-
-const hist=s.histogram||[];
-const maxH=Math.max(...hist,1);
-for(let i=0;i<parts.bars.length;i++){
-const v=hist[i]||0;
-parts.bars[i].style.height=((v/maxH)*100)+'%';
-}
-}
-
-function updateSignalAges(){
-const now=Date.now()/1000;
-signalEls.forEach(parts=>{
-const ts=parseFloat(parts.root.dataset.ts||'0');
-if(!ts)return;
-const age=now-ts;
-parts.age.textContent=age<60?Math.round(age)+'s':Math.round(age/60)+'m';
-parts.root.classList.toggle('new',age<5);
-});
-}
-
-function renderProtocols(stats){
-const container=el.protocols;
-if(!stats||!Object.keys(stats).length){
-state.protocolsReady=false;
-container.innerHTML='<div style="color:var(--dim);padding:8px">No protocols detected</div>';
-protocolEls.clear();
-return;
-}
-
-if(!state.protocolsReady){
-state.protocolsReady=true;
-container.textContent='';
-}
-
-const total=Object.values(stats).reduce((a,b)=>a+b,0)||1;
-const entries=Object.entries(stats);
-const seen=new Set();
-entries.forEach(([p,n])=>{
-seen.add(p);
-let row=protocolEls.get(p);
-if(!row){
-const root=document.createElement('div');
-root.className='proto-row';
-const icon=document.createElement('div');
-icon.className='proto-icon';
-icon.textContent=protoIcons[p]||'📻';
-const name=document.createElement('div');
-name.className='proto-name';
-name.textContent=p.replace(/_/g,' ');
-const bar=document.createElement('div');
-bar.className='proto-bar';
-const fill=document.createElement('div');
-fill.className='proto-fill';
-bar.appendChild(fill);
-const count=document.createElement('div');
-count.className='proto-count';
-root.appendChild(icon);
-root.appendChild(name);
-root.appendChild(bar);
-root.appendChild(count);
-row={root,fill,count};
-protocolEls.set(p,row);
-}
-const pct=(n/total)*100;
-row.fill.style.width=pct+'%';
-row.fill.style.background=protoColors[p]||'var(--blue)';
-row.count.textContent=String(n);
-container.appendChild(row.root);
-});
-
-[...protocolEls.entries()].forEach(([p,row])=>{
-if(!seen.has(p)){
-row.root.remove();
-protocolEls.delete(p);
-}
-});
-}
-
-function addLog(d){
-const l=el.log;
-const ts=new Date((d.ts||Date.now()/1000)*1000).toLocaleTimeString();
-const newSigs=d.new_signals||[];
-const newStr=newSigs.length?' <span class="log-new">+'+newSigs.length+' NEW</span>':'';
-const msg=d._msg?' '+String(d._msg):'';
-const e=document.createElement('div');
-e.className='log-entry';
-e.innerHTML='<span class="log-ts">'+ts+'</span><span>'+(d.total_signals||0)+' sig ('+(d.decoded_signals||0)+' decoded)'+newStr+msg+'</span>';
-l.insertBefore(e,l.firstChild);
-while(l.children.length>40)l.removeChild(l.lastChild);
-}
-
-function showAlerts(sigs){
-sigs.forEach((s,i)=>{
-setTimeout(()=>{
-const a=document.createElement('div');
-a.className='alert';
-a.textContent='NEW: '+s.label;
-a.style.top=(60+i*40)+'px';
-document.body.appendChild(a);
-setTimeout(()=>a.remove(),3000);
-},i*200);
-});
-}
-
-buildFreqGrid();
-buildWave();
-connect();
-setInterval(updateSignalAges,1000);
-window.addEventListener('resize',renderTimeline);
-</script></body></html>'''
+    (config.work_dir / 'decode.html').write_text(html, encoding='utf-8')
+    (config.work_dir / 'decode.css').write_text(css, encoding='utf-8')
+    (config.work_dir / 'decode.js').write_text(js, encoding='utf-8')
 
 
 async def main():
@@ -1377,12 +947,7 @@ async def main():
     config = build_config()
     config.work_dir.mkdir(parents=True, exist_ok=True)
 
-    (config.work_dir / 'decode.html').write_text(
-        DASHBOARD
-        .replace('__WS_PORT__', str(config.ws_port))
-        .replace('__FREQS__', json.dumps([hz_to_mhz(f) for f in config.freqs_hz])),
-        encoding='utf-8',
-    )
+    write_dashboard_files(config)
 
     threading.Thread(target=http_thread, args=(config,), daemon=True).start()
     threading.Thread(target=capture_thread, args=(config,), daemon=True).start()
