@@ -20,24 +20,52 @@
   };
   const palette = ["#3fb950", "#58a6ff", "#d29922", "#f85149", "#56d4dd", "#a371f7", "#f0883e"];
 
-  const protoIcons = {
-    princeton: "🚗",
-    came_12bit: "🚧",
-    nice_flo: "🚧",
-    keeloq: "🔐",
-    oregon_v2: "🌡️",
-    smart_meter: "⚡",
-    tpms: "🛞",
-    doorbell: "🔔",
-    honeywell: "🚨",
-    amb_weather: "🌤️",
-    fixed_code: "📻",
-    fsk_signal: "📶",
-    slow_signal: "📡",
-    complex_signal: "❓",
-    ook_signal: "📻",
-    unknown: "❓",
+  const protoIconIds = {
+    princeton: "rf-car",
+    came_12bit: "rf-gate",
+    nice_flo: "rf-gate",
+    keeloq: "rf-lock",
+    oregon_v2: "rf-weather",
+    smart_meter: "rf-meter",
+    tpms: "rf-tire",
+    doorbell: "rf-bell",
+    honeywell: "rf-alarm",
+    amb_weather: "rf-weather",
+    fixed_code: "rf-radio",
+    fsk_signal: "rf-signal",
+    slow_signal: "rf-antenna",
+    complex_signal: "rf-question",
+    ook_signal: "rf-radio",
+    unknown: "rf-question",
   };
+
+  function iconHref(id) { return `icons.svg#${id}`; }
+
+  function makeIcon(id, className = "ico") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", className);
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("viewBox", "0 0 24 24");
+
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    const href = iconHref(id);
+    use.setAttribute("href", href);
+    use.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", href);
+    svg.appendChild(use);
+
+    return svg;
+  }
+
+  function setIconText(node, iconId, text, className = "ico") {
+    node.textContent = "";
+    node.appendChild(makeIcon(iconId, className));
+    node.appendChild(document.createTextNode(` ${text}`));
+  }
+
+  function protoIconId(protoName) {
+    const key = String(protoName || "unknown");
+    return protoIconIds[key] || "rf-radio";
+  }
 
   const protoColors = {
     princeton: "#3fb950",
@@ -88,10 +116,9 @@
     onlyDecodedToggle: document.getElementById("onlyDecodedToggle"),
     pauseBtn: document.getElementById("pauseBtn"),
     clearBtn: document.getElementById("clearBtn"),
-    helpBtn: document.getElementById("helpBtn"),
-    help: document.getElementById("help"),
-    helpFoot: document.getElementById("helpFoot"),
     toasts: document.getElementById("toasts"),
+    pauseBtnLabel: document.querySelector("#pauseBtn .btn-label"),
+    pauseBtnUse: document.querySelector("#pauseBtn use"),
   };
 
   function nowSec() { return Date.now() / 1000; }
@@ -373,7 +400,6 @@
 
   function upsertProtocolRow(proto, count, total) {
     const key = String(proto || "unknown");
-    const icon = protoIcons[key] || "📻";
     let els = protoEls.get(key);
     if (!els) {
       const row = document.createElement("div");
@@ -381,7 +407,7 @@
 
       const ic = document.createElement("div");
       ic.className = "proto-icon";
-      ic.textContent = icon;
+      ic.appendChild(makeIcon(protoIconId(key)));
 
       const name = document.createElement("div");
       name.className = "proto-name";
@@ -688,8 +714,8 @@
       top.className = "top";
       const label = document.createElement("div");
       label.className = "label";
-      const icon = evt.protocol && evt.protocol.icon ? evt.protocol.icon : "📻";
-      label.textContent = `${icon} ${evt.label}`;
+      const pLabel = evt.protocol && evt.protocol.protocol ? evt.protocol.protocol : "unknown";
+      setIconText(label, protoIconId(pLabel), evt.label, "ico ico-sm");
       const meta = document.createElement("div");
       meta.className = "meta";
       meta.textContent = `${evt.freq} MHz · ${fmtAge(evt.ts)}`;
@@ -703,7 +729,7 @@
       const conf = fmtPct(Number(evt.confidence || 0));
 
       row.appendChild(pill("fp", evt.fp));
-      row.appendChild(pill("proto", `${protoIcons[p] || "📻"} ${String(p).replace(/_/g, " ")}`));
+      row.appendChild(pill("proto", String(p).replace(/_/g, " "), protoIconId(p)));
       row.appendChild(pill("conf", conf));
       if (Number.isFinite(evt.n_pulses)) row.appendChild(pill("pulses", fmtNum(evt.n_pulses)));
       if (Number.isFinite(evt.duration_ms)) row.appendChild(pill("dur", `${evt.duration_ms}ms`));
@@ -716,13 +742,19 @@
     });
   }
 
-  function pill(k, v) {
+  function pill(k, v, iconId = null) {
     const p = document.createElement("span");
     p.className = "pill";
     const kk = document.createElement("b");
     kk.textContent = k;
     p.appendChild(kk);
-    p.appendChild(document.createTextNode(` ${v}`));
+    if (iconId) {
+      p.appendChild(document.createTextNode(" "));
+      p.appendChild(makeIcon(iconId, "ico ico-xs"));
+      p.appendChild(document.createTextNode(` ${v}`));
+    } else {
+      p.appendChild(document.createTextNode(` ${v}`));
+    }
     return p;
   }
 
@@ -787,10 +819,9 @@
 
     const proto = signal.protocol || {};
     const protoName = proto.protocol || "unknown";
-    const icon = proto.icon || protoIcons[protoName] || "📻";
     const freqK = fkey(signal.freq);
 
-    el.inspectLabel.textContent = `${icon} ${signal.label || proto.desc || "Signal"}`;
+    setIconText(el.inspectLabel, protoIconId(protoName), signal.label || proto.desc || "Signal", "ico ico-sm");
     el.inspectMeta.textContent = `${freqK} MHz · fp ${signal.fp || "--"} · ${fmtAge(Number(signal.ts || nowSec()))}`;
 
     el.inspectBadges.textContent = "";
@@ -976,7 +1007,13 @@
   function togglePause() {
     state.paused = !state.paused;
     el.pauseBtn.classList.toggle("on", state.paused);
-    el.pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+    if (el.pauseBtnLabel) el.pauseBtnLabel.textContent = state.paused ? "Resume" : "Pause";
+    if (el.pauseBtnUse) {
+      const id = state.paused ? "rf-play" : "rf-pause";
+      const href = iconHref(id);
+      el.pauseBtnUse.setAttribute("href", href);
+      el.pauseBtnUse.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", href);
+    }
     toast(state.paused ? "paused" : "resumed", "ok");
 
     if (!state.paused && state.pausedBuffer.length) {
@@ -993,11 +1030,6 @@
     toast("cleared", "ok");
   }
 
-  function toggleHelp(show) {
-    const next = (typeof show === "boolean") ? show : !!el.help.hidden;
-    el.help.hidden = !next;
-  }
-
   function initUI() {
     buildLegend();
     buildBandGrid();
@@ -1005,11 +1037,8 @@
     resizeAllCanvases();
     drawWaterfallFrame(true);
 
-    el.helpFoot.textContent = `ws ${wsUrl} · workdir ${workDir} · freqs ${freqOrder.join(", ")} MHz`;
-
     el.pauseBtn.addEventListener("click", togglePause);
     el.clearBtn.addEventListener("click", clearEvents);
-    el.helpBtn.addEventListener("click", () => toggleHelp());
 
     el.filterInput.addEventListener("input", renderEventStream);
     el.onlyNewToggle.addEventListener("change", renderEventStream);
@@ -1018,13 +1047,6 @@
     window.addEventListener("resize", () => {
       resizeAllCanvases();
       renderEventStream();
-    });
-
-    document.addEventListener("keydown", (e) => {
-      if (e.key === " ") { e.preventDefault(); togglePause(); }
-      else if (e.key === "c" || e.key === "C") { clearEvents(); }
-      else if (e.key === "?") { toggleHelp(); }
-      else if (e.key === "Escape") { toggleHelp(false); }
     });
   }
 

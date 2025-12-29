@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <defs>
+    <linearGradient id="rfShine" x1="4" y1="4" x2="20" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="currentColor" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="currentColor" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Mark: antenna + waveform inside a ring -->
+  <symbol id="rf-mark" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M7.2 14.8c1.4 0 1.7-2.2 3.0-2.2s1.6 2.2 2.9 2.2 1.6-2.2 2.9-2.2 1.6 2.2 3.0 2.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+    <path d="M12 6.2v6.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M10.5 12.4h3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M9.2 8.6a4.5 4.5 0 0 1 5.6 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity="0.75"/>
+    <path d="M7.7 7a6.8 6.8 0 0 1 8.6 0" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M5.9 5.5a9.2 9.2 0 0 1 12.2 0" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-antenna" viewBox="0 0 24 24">
+    <path d="M12 6.3v12.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M9.8 18.5h4.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M9.1 15.8l2.9-2.2 2.9 2.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M9.3 9.0a4.6 4.6 0 0 1 5.4 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity="0.75"/>
+    <path d="M7.5 7.1a7.0 7.0 0 0 1 9 0" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.5"/>
+    <path d="M5.7 5.5a9.4 9.4 0 0 1 12.6 0" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.32"/>
+    <path d="M7.2 14.2c1.0 0 1.2-1.2 2.1-1.2s1.1 1.2 2 1.2 1.1-1.2 2.0-1.2 1.1 1.2 2.1 1.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+  </symbol>
+
+  <symbol id="rf-waveform" viewBox="0 0 24 24">
+    <path d="M4 12h2.4l1.3-4.3L10 18l2-8 2 4 1.4-2H20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M4 6.5h16" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+    <path d="M4 17.5h16" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-waterfall" viewBox="0 0 24 24">
+    <path d="M5.5 7.5h13a1.5 1.5 0 0 1 1.5 1.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18V9a1.5 1.5 0 0 1 1.5-1.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M8.2 10.2v8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.95"/>
+    <path d="M12 11.6v6.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/>
+    <path d="M15.8 10.9v7.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/>
+    <path d="M5.8 9.7h12.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+    <path d="M6.3 13.0h11.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.22"/>
+    <path d="M6.3 16.2h11.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.22"/>
+  </symbol>
+
+  <symbol id="rf-fingerprint" viewBox="0 0 24 24">
+    <path d="M12 6.3c-3.3 0-6 2.4-6 5.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+    <path d="M12 6.3c3.3 0 6 2.4 6 5.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+    <path d="M8.1 11.8c0-2 1.8-3.6 3.9-3.6s3.9 1.6 3.9 3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M9.3 11.8c0 4.8-1.7 5.9-1.7 7.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.85"/>
+    <path d="M12 11.8c0 6.3-1.5 6.8-1.5 8.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.65"/>
+    <path d="M14.7 11.8c0 4.8 1.7 5.9 1.7 7.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.85"/>
+    <path d="M12 13.1c0 4.8.8 5.6 1.1 6.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M8.8 19.2c1.5.7 3.2.8 4.7.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.5"/>
+  </symbol>
+
+  <symbol id="rf-lock" viewBox="0 0 24 24">
+    <path d="M7.2 11.2h9.6a1.8 1.8 0 0 1 1.8 1.8v5.1a2.2 2.2 0 0 1-2.2 2.2H7.6a2.2 2.2 0 0 1-2.2-2.2V13a1.8 1.8 0 0 1 1.8-1.8Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M8.8 11.2V9.1a3.2 3.2 0 1 1 6.4 0v2.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M12 14.2v3.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" opacity="0.9"/>
+    <path d="M10.8 15.4h2.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity="0.45"/>
+  </symbol>
+
+  <symbol id="rf-thermo" viewBox="0 0 24 24">
+    <path d="M12 5.3a2.2 2.2 0 0 0-2.2 2.2v7.4a3.6 3.6 0 1 0 4.4 0V7.5A2.2 2.2 0 0 0 12 5.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M12 8v8.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="12" cy="18" r="1.1" fill="currentColor" opacity="0.85"/>
+    <path d="M16.9 7.2h2.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+    <path d="M16.4 9.6h2.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.25"/>
+  </symbol>
+
+  <symbol id="rf-bolt" viewBox="0 0 24 24">
+    <path d="M13.2 2.8 6.7 13.1h5.3l-1.2 8.1 6.5-10.3h-5.2l1.1-8.1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M7.6 14.2h8.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-tire" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.7"/>
+    <circle cx="12" cy="12" r="2.2" stroke="currentColor" stroke-width="1.6" opacity="0.95"/>
+    <path d="M12 4.5v3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M12 16.3v3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M4.5 12h3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M16.3 12h3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M7.1 7.1l2.2 2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M16.9 16.9l-2.2-2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M16.9 7.1l-2.2 2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M7.1 16.9l2.2-2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+  </symbol>
+
+  <symbol id="rf-bell" viewBox="0 0 24 24">
+    <path d="M12 21.1a2.2 2.2 0 0 0 2.1-1.5H9.9A2.2 2.2 0 0 0 12 21.1Z" fill="currentColor" opacity="0.75"/>
+    <path d="M7.3 10.6a4.7 4.7 0 0 1 9.4 0c0 5.2 1.6 5.8 1.6 6.9H5.7c0-1.1 1.6-1.7 1.6-6.9Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M9.2 6.8a3.4 3.4 0 0 1 5.6 0" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.4"/>
+  </symbol>
+
+  <symbol id="rf-alarm" viewBox="0 0 24 24">
+    <path d="M9.3 8.2a2.7 2.7 0 0 1 5.4 0v1.4h-5.4V8.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" opacity="0.9"/>
+    <path d="M8.2 9.6h7.6a2.2 2.2 0 0 1 2.2 2.2v4.2a2.7 2.7 0 0 1-2.7 2.7H8.7A2.7 2.7 0 0 1 6 16V11.8a2.2 2.2 0 0 1 2.2-2.2Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M9 18.7h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.9"/>
+    <path d="M5.3 11.4c-.7.8-1.1 1.7-1.3 2.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+    <path d="M18.7 11.4c.7.8 1.1 1.7 1.3 2.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+    <path d="M6.6 8.0 5.2 6.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+    <path d="M17.4 8.0 18.8 6.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-weather" viewBox="0 0 24 24">
+    <path d="M8.2 16.6h8.7a3.1 3.1 0 0 0 .4-6.2 4.4 4.4 0 0 0-8.2-1.5 3.5 3.5 0 0 0-.9 6.9Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M7.2 19.1c1.2 0 1.4-1.8 2.6-1.8s1.4 1.8 2.6 1.8 1.4-1.8 2.6-1.8 1.4 1.8 2.6 1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M17.9 8.1a5.7 5.7 0 0 1 1.1 2.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-meter" viewBox="0 0 24 24">
+    <path d="M7.2 5.8h9.6a2.2 2.2 0 0 1 2.2 2.2v10a2.6 2.6 0 0 1-2.6 2.6H7.6A2.6 2.6 0 0 1 5 18V8a2.2 2.2 0 0 1 2.2-2.2Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M8.3 9.2h7.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.8"/>
+    <path d="M8.3 11.7h5.0" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M8.3 14.7a3.7 3.7 0 0 1 7.4 0" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.75"/>
+    <path d="M12 14.7l2.1-1.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M10.1 6.6h3.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-radio" viewBox="0 0 24 24">
+    <path d="M6.2 9.1 16.9 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+    <path d="M5.5 9.7h13.8a1.7 1.7 0 0 1 1.7 1.7v6.2a2.4 2.4 0 0 1-2.4 2.4H6.4A2.4 2.4 0 0 1 4 17.6v-6.2a1.7 1.7 0 0 1 1.5-1.7Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M7.2 13.2h6.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.9"/>
+    <circle cx="17.3" cy="15" r="1.6" stroke="currentColor" stroke-width="1.4"/>
+    <path d="M16.4 15h1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.5"/>
+  </symbol>
+
+  <symbol id="rf-signal" viewBox="0 0 24 24">
+    <path d="M4.5 18.5h1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M8.2 18.5h2.0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.75"/>
+    <path d="M12.1 18.5h2.0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.55"/>
+    <path d="M16.0 18.5h2.0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.35"/>
+    <path d="M6.1 15.7a7.8 7.8 0 0 1 11.8 0" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.45"/>
+    <path d="M8.8 13.1a4.8 4.8 0 0 1 6.4 0" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/>
+    <path d="M11 10.8a2 2 0 0 1 2 0" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  </symbol>
+
+  <symbol id="rf-car" viewBox="0 0 24 24">
+    <path d="M7.4 12.2 9.2 8.6h5.6l1.8 3.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M6.4 12.2h11.2a1.7 1.7 0 0 1 1.7 1.7v3.0a2.2 2.2 0 0 1-2.2 2.2H7a2.2 2.2 0 0 1-2.2-2.2v-3.0a1.7 1.7 0 0 1 1.6-1.7Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <circle cx="8.2" cy="16.2" r="1.3" stroke="currentColor" stroke-width="1.4"/>
+    <circle cx="15.8" cy="16.2" r="1.3" stroke="currentColor" stroke-width="1.4"/>
+    <path d="M10.2 14.1h3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/>
+  </symbol>
+
+  <symbol id="rf-gate" viewBox="0 0 24 24">
+    <path d="M5.3 19.2h13.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M6.3 19.2V9.2c0-1.3 1.0-2.3 2.3-2.3h6.8c1.3 0 2.3 1.0 2.3 2.3v10" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M9.0 10.1v6.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M12 10.1v6.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M15.0 10.1v6.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+    <path d="M17.9 7.3c1.1.4 1.9 1.5 1.9 2.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.35"/>
+  </symbol>
+
+  <symbol id="rf-question" viewBox="0 0 24 24">
+    <path d="M9.3 9.3a3 3 0 0 1 5.4 1.8c0 2.1-2.1 2.4-2.1 3.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="12" cy="18.1" r="1.0" fill="currentColor"/>
+    <path d="M5.2 5.2h13.6v13.6H5.2z" stroke="currentColor" stroke-width="1.1" opacity="0.25"/>
+  </symbol>
+
+  <symbol id="rf-pause" viewBox="0 0 24 24">
+    <path d="M8.4 7.2v9.6" stroke="currentColor" stroke-width="2.0" stroke-linecap="round"/>
+    <path d="M15.6 7.2v9.6" stroke="currentColor" stroke-width="2.0" stroke-linecap="round"/>
+    <path d="M5.2 6.1h13.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.25"/>
+    <path d="M5.2 17.9h13.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.25"/>
+  </symbol>
+
+  <symbol id="rf-play" viewBox="0 0 24 24">
+    <path d="M9 7.6v8.8l7.7-4.4L9 7.6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M6.1 6.1h13.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.25"/>
+    <path d="M6.1 17.9h13.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.25"/>
+  </symbol>
+
+  <symbol id="rf-trash" viewBox="0 0 24 24">
+    <path d="M8.1 7.6h7.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M9.3 7.6 10.2 5.8h3.6l.9 1.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M7.6 7.6l.7 12.1a1.9 1.9 0 0 0 1.9 1.8h3.6a1.9 1.9 0 0 0 1.9-1.8l.7-12.1" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <path d="M10.4 11v7.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M13.6 11v7.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M6 7.6h12" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity="0.25"/>
+  </symbol>
+
+  <!-- Subtle shine plate (for inline use if desired) -->
+  <symbol id="rf-plate" viewBox="0 0 24 24">
+    <path d="M6.3 6.7h11.4a2.4 2.4 0 0 1 2.4 2.4v5.8a2.4 2.4 0 0 1-2.4 2.4H6.3A2.4 2.4 0 0 1 3.9 15V9.1a2.4 2.4 0 0 1 2.4-2.4Z" fill="url(#rfShine)" stroke="currentColor" stroke-width="1.2" opacity="0.95"/>
+  </symbol>
+</svg>

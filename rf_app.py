@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-RF Decode - Protocol classification and semantic labeling
-Analyzes timing patterns to identify signal types
+RF Observatory - Real-time RF signal intelligence
+Protocol classification, fingerprinting, and spectrum analysis for Flipper Zero
 """
 
 import argparse
@@ -120,8 +120,118 @@ def detect_flipper_port() -> str | None:
     return candidates[0] if candidates else None
 
 
+def wake_and_validate_flipper(ser: serial.Serial, max_attempts: int = 3) -> tuple[bool, str]:
+    """
+    Wake the Flipper CLI and validate it responds to commands.
+
+    Returns (success, message) tuple.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Clear any stale data
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            # Send multiple Ctrl+C to exit any running app/command
+            for _ in range(3):
+                ser.write(b'\x03')
+                time.sleep(0.1)
+
+            # Wait for banner/prompt
+            time.sleep(0.5 * attempt)  # Increase wait on retries
+
+            # Drain the banner
+            banner = b''
+            start = time.time()
+            while time.time() - start < 2.0:
+                if ser.in_waiting:
+                    try:
+                        banner += ser.read(ser.in_waiting)
+                    except serial.SerialException:
+                        break
+                    time.sleep(0.05)
+                else:
+                    time.sleep(0.1)
+
+            if not banner:
+                if attempt < max_attempts:
+                    continue
+                return False, "No response from Flipper CLI (no banner)"
+
+            # Check we got the prompt
+            if b'>:' not in banner:
+                if attempt < max_attempts:
+                    continue
+                return False, "Flipper responded but no CLI prompt found"
+
+            # Now test with a real command
+            time.sleep(0.2)
+            ser.write(b'uptime\r\n')
+            time.sleep(0.5)
+
+            response = b''
+            start = time.time()
+            while time.time() - start < 2.0:
+                if ser.in_waiting:
+                    try:
+                        response += ser.read(ser.in_waiting)
+                    except serial.SerialException:
+                        break
+                    time.sleep(0.05)
+                else:
+                    time.sleep(0.1)
+
+            # Check for valid uptime response
+            resp_text = response.decode('utf-8', errors='replace')
+            if 'Uptime:' in resp_text or 'uptime' in resp_text.lower():
+                # Extract firmware version from banner for logging
+                fw_match = re.search(r'Firmware version:\s*([^\r\n]+)', banner.decode('utf-8', errors='replace'))
+                fw_ver = fw_match.group(1).strip() if fw_match else 'unknown'
+                return True, f"CLI validated (firmware: {fw_ver})"
+
+            # CLI showed banner but command didn't work - this is the "sleep" issue
+            if attempt < max_attempts:
+                # Try harder - close and reopen might help
+                time.sleep(0.5 * attempt)
+                continue
+
+            return False, "Flipper CLI not responding to commands (may need replug)"
+
+        except serial.SerialException as e:
+            if attempt < max_attempts:
+                time.sleep(0.5)
+                continue
+            return False, f"Serial error: {e}"
+        except Exception as e:
+            return False, f"Unexpected error: {e}"
+
+    return False, "Failed to wake Flipper CLI after all attempts"
+
+
+def validate_flipper_connection(port: str) -> tuple[bool, str, serial.Serial | None]:
+    """
+    Open serial port and validate Flipper CLI is responsive.
+
+    Returns (success, message, serial_connection).
+    If success is False, serial_connection will be None.
+    """
+    try:
+        ser = serial.Serial(port, 230400, timeout=0.5)
+    except serial.SerialException as e:
+        return False, f"Cannot open {port}: {e}", None
+    except Exception as e:
+        return False, f"Serial error: {e}", None
+
+    success, msg = wake_and_validate_flipper(ser)
+    if not success:
+        ser.close()
+        return False, msg, None
+
+    return True, msg, ser
+
+
 def build_config() -> AppConfig:
-    parser = argparse.ArgumentParser(description="RF Decode - protocol classification dashboard")
+    parser = argparse.ArgumentParser(description="RF Observatory - real-time RF signal intelligence")
     parser.add_argument('--port', default=os.environ.get('FLIPPER_PORT') or DEFAULT_FLIPPER_PORT,
                         help='Serial port path (or "auto")')
     parser.add_argument('--ws-port', type=int, default=DEFAULT_WS_PORT, help='WebSocket port')
@@ -131,7 +241,7 @@ def build_config() -> AppConfig:
     parser.add_argument('--freqs', default=','.join(str(hz_to_mhz(f)) for f in DEFAULT_FREQS_HZ),
                         help='Comma-separated frequencies (MHz or Hz), e.g. 433.92 or 433920000')
     parser.add_argument('--work-dir', default=str(DEFAULT_WORK_DIR),
-                        help='Directory to write and serve decode.html from')
+                        help='Directory to write and serve UI from')
     parser.add_argument('--mock', action='store_true', help='Run without a Flipper; generate synthetic signals')
     args = parser.parse_args()
 
@@ -170,7 +280,7 @@ PROTOCOL_SIGNATURES = {
         'bits': 24,
         'desc': 'Fixed code remote',
         'category': 'remote',
-        'icon': '🚗',
+        'icon': '\U0001F697',
     },
     'came_12bit': {
         'pulse_range': (250, 400),
@@ -180,7 +290,7 @@ PROTOCOL_SIGNATURES = {
         'bits': 12,
         'desc': 'CAME gate/garage',
         'category': 'gate',
-        'icon': '🚧',
+        'icon': '\U0001F6A7',
     },
     'nice_flo': {
         'pulse_range': (600, 900),
@@ -190,16 +300,16 @@ PROTOCOL_SIGNATURES = {
         'bits': 12,
         'desc': 'Nice FLO remote',
         'category': 'gate',
-        'icon': '🚧',
+        'icon': '\U0001F6A7',
     },
     'keeloq': {
         'pulse_range': (300, 500),
-        'te': 400,  # Time element ~400µs
+        'te': 400,  # Time element ~400us
         'min_pulses': 60,
         'bits': 66,
         'desc': 'Rolling code (KeeLoq)',
         'category': 'secure',
-        'icon': '🔐',
+        'icon': '\U0001F510',
     },
     'oregon_v2': {
         'pulse_range': (400, 700),
@@ -207,7 +317,7 @@ PROTOCOL_SIGNATURES = {
         'min_pulses': 100,
         'desc': 'Oregon Scientific weather',
         'category': 'sensor',
-        'icon': '🌡️',
+        'icon': '\U0001F321\uFE0F',
     },
     'honeywell': {
         'pulse_range': (400, 600),
@@ -215,7 +325,7 @@ PROTOCOL_SIGNATURES = {
         'min_pulses': 40,
         'desc': 'Honeywell security',
         'category': 'alarm',
-        'icon': '🚨',
+        'icon': '\U0001F6A8',
     },
     'amb_weather': {
         'pulse_range': (450, 600),
@@ -223,21 +333,21 @@ PROTOCOL_SIGNATURES = {
         'min_pulses': 30,
         'desc': 'Ambient weather sensor',
         'category': 'sensor',
-        'icon': '🌤️',
+        'icon': '\U0001F324\uFE0F',
     },
     'tpms': {
         'pulse_range': (40, 80),
         'min_pulses': 50,
         'desc': 'Tire pressure sensor',
         'category': 'automotive',
-        'icon': '🛞',
+        'icon': '\U0001F6DE',
     },
     'smart_meter': {
         'pulse_range': (15, 50),
         'min_pulses': 100,
         'desc': 'Smart utility meter',
         'category': 'utility',
-        'icon': '⚡',
+        'icon': '\u26A1',
     },
     'doorbell': {
         'pulse_range': (200, 400),
@@ -245,7 +355,7 @@ PROTOCOL_SIGNATURES = {
         'min_pulses': 20,
         'desc': 'Wireless doorbell',
         'category': 'home',
-        'icon': '🔔',
+        'icon': '\U0001F514',
     },
 }
 
@@ -303,7 +413,7 @@ def analyze_timing_pattern(burst):
     std_dev = variance ** 0.5
     cv = std_dev / pulse_mean if pulse_mean > 0 else 0  # Coefficient of variation
 
-    # Distinct pulse widths (quantized to 50µs)
+    # Distinct pulse widths (quantized to 50us)
     quantized = set(p // 50 * 50 for p in on_pulses)
     n_distinct = len(quantized)
 
@@ -420,7 +530,7 @@ def classify_protocol(analysis, freq_mhz):
             'confidence': 40,
             'desc': 'FSK/digital signal',
             'category': 'digital',
-            'icon': '📶',
+            'icon': '\U0001F4F6',
         }
     elif pulse_mean > 5000:
         return {
@@ -428,7 +538,7 @@ def classify_protocol(analysis, freq_mhz):
             'confidence': 30,
             'desc': 'Slow/status beacon',
             'category': 'beacon',
-            'icon': '📡',
+            'icon': '\U0001F4E1',
         }
     elif cv < 0.2:  # Very consistent pulse widths
         return {
@@ -436,7 +546,7 @@ def classify_protocol(analysis, freq_mhz):
             'confidence': 50,
             'desc': 'Fixed code signal',
             'category': 'remote',
-            'icon': '📻',
+            'icon': '\U0001F4FB',
         }
     elif n_distinct > 5:
         return {
@@ -444,7 +554,7 @@ def classify_protocol(analysis, freq_mhz):
             'confidence': 35,
             'desc': 'Complex modulation',
             'category': 'unknown',
-            'icon': '❓',
+            'icon': '\u2753',
         }
     else:
         return {
@@ -452,7 +562,7 @@ def classify_protocol(analysis, freq_mhz):
             'confidence': 25,
             'desc': 'OOK signal',
             'category': 'unknown',
-            'icon': '📻',
+            'icon': '\U0001F4FB',
         }
 
 
@@ -465,7 +575,7 @@ def compute_fingerprint(burst):
     if len(on_pulses) < 3:
         return None
 
-    # Quantize to 50µs for stability
+    # Quantize to 50us for stability
     quantized = [t // 50 * 50 for t in on_pulses[:30]]
     pattern = ','.join(str(t) for t in quantized)
     return hashlib.md5(pattern.encode()).hexdigest()[:8]
@@ -477,7 +587,7 @@ def get_signal_label(signal):
     if not proto:
         return 'Unknown Signal'
 
-    icon = proto.get('icon', '📻')
+    icon = proto.get('icon', '\U0001F4FB')
     desc = proto.get('desc', 'Signal')
     conf = proto.get('confidence', 0)
 
@@ -676,19 +786,21 @@ def capture_thread(config: AppConfig):
 
     cycle = 0
     while True:
-        try:
-            ser = serial.Serial(config.flipper_port, 230400, timeout=0.3)
-            time.sleep(0.3)
-            ser.read(ser.in_waiting)
-            print(f"Flipper connected: {config.flipper_port}")
-            data_queue.put({'type': 'status', 'connected': True, 'mock': False, 'port': config.flipper_port, 'ts': time.time()})
-        except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
-            print(f"Flipper error: {msg}")
+        # Validate Flipper connection with wake-up sequence
+        print(f"Connecting to Flipper at {config.flipper_port}...")
+        success, msg, ser = validate_flipper_connection(config.flipper_port)
+
+        if not success:
+            print(f"\033[91mFlipper validation failed: {msg}\033[0m")
             data_queue.put({'type': 'error', 'msg': msg, 'ts': time.time()})
             data_queue.put({'type': 'status', 'connected': False, 'mock': False, 'ts': time.time()})
-            time.sleep(2.0)
+            print("Retrying in 3 seconds... (try unplugging and replugging USB)")
+            time.sleep(3.0)
             continue
+
+        print(f"\033[92mFlipper connected: {config.flipper_port}\033[0m")
+        print(f"  {msg}")
+        data_queue.put({'type': 'status', 'connected': True, 'mock': False, 'port': config.flipper_port, 'ts': time.time()})
 
         try:
             while True:
@@ -904,13 +1016,28 @@ async def ws_handler(websocket, path=None):
 
 
 def http_thread(config: AppConfig):
-    """HTTP server."""
+    """HTTP server with index.html redirect."""
 
-    class QuietHandler(SimpleHTTPRequestHandler):
+    class IndexHandler(SimpleHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-    handler = partial(QuietHandler, directory=str(config.work_dir))
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            return super().end_headers()
+
+        def do_GET(self):
+            # Redirect / to /index.html
+            if self.path == '/':
+                self.send_response(302)
+                self.send_header('Location', '/index.html')
+                self.end_headers()
+                return
+            return super().do_GET()
+
+    handler = partial(IndexHandler, directory=str(config.work_dir))
     HTTPServer(('localhost', config.http_port), handler).serve_forever()
 
 
@@ -919,9 +1046,10 @@ def http_thread(config: AppConfig):
 
 def write_dashboard_files(config: AppConfig) -> None:
     ui_dir = Path(__file__).resolve().parent / 'ui'
-    html_template = (ui_dir / 'decode.html').read_text(encoding='utf-8')
-    css = (ui_dir / 'decode.css').read_text(encoding='utf-8')
-    js = (ui_dir / 'decode.js').read_text(encoding='utf-8')
+    html_template = (ui_dir / 'index.html').read_text(encoding='utf-8')
+    css = (ui_dir / 'observatory.css').read_text(encoding='utf-8')
+    js = (ui_dir / 'observatory.js').read_text(encoding='utf-8')
+    icons = (ui_dir / 'icons.svg').read_text(encoding='utf-8')
 
     ui_config = {
         'ws_port': config.ws_port,
@@ -934,28 +1062,51 @@ def write_dashboard_files(config: AppConfig) -> None:
 
     html = html_template.replace('__CONFIG__', json.dumps(ui_config))
 
-    (config.work_dir / 'decode.html').write_text(html, encoding='utf-8')
-    (config.work_dir / 'decode.css').write_text(css, encoding='utf-8')
-    (config.work_dir / 'decode.js').write_text(js, encoding='utf-8')
+    (config.work_dir / 'index.html').write_text(html, encoding='utf-8')
+    (config.work_dir / 'observatory.css').write_text(css, encoding='utf-8')
+    (config.work_dir / 'observatory.js').write_text(js, encoding='utf-8')
+    (config.work_dir / 'icons.svg').write_text(icons, encoding='utf-8')
 
 
 async def main():
     print("=" * 50)
-    print("RF Decode - Protocol Classification")
+    print("RF Observatory")
+    print("Real-time RF signal intelligence")
     print("=" * 50)
 
     config = build_config()
     config.work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Upfront validation for real Flipper mode
+    if not config.mock:
+        print(f"\nValidating Flipper connection at {config.flipper_port}...")
+        success, msg, ser = validate_flipper_connection(config.flipper_port)
+        if ser:
+            ser.close()  # Close test connection; capture thread will reopen
+
+        if not success:
+            print(f"\n\033[91mERROR: Flipper validation failed\033[0m")
+            print(f"  {msg}")
+            print("\nTroubleshooting:")
+            print("  1. Unplug and replug the USB cable")
+            print("  2. Make sure no app is open on the Flipper screen")
+            print("  3. Try rebooting the Flipper (hold back → Reboot)")
+            print("  4. Or use --mock for synthetic signals")
+            sys.exit(1)
+
+        print(f"\033[92m✓ {msg}\033[0m\n")
 
     write_dashboard_files(config)
 
     threading.Thread(target=http_thread, args=(config,), daemon=True).start()
     threading.Thread(target=capture_thread, args=(config,), daemon=True).start()
 
-    print(f"HTTP: http://localhost:{config.http_port}/decode.html")
+    print(f"Dashboard: http://localhost:{config.http_port}/")
     print(f"WebSocket: ws://localhost:{config.ws_port}")
     if config.mock:
         print("Mode: mock (synthetic signals)")
+    else:
+        print(f"Flipper: {config.flipper_port}")
     print("Press Ctrl+C to stop\n")
 
     await websockets.serve(ws_handler, 'localhost', config.ws_port)

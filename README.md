@@ -1,4 +1,6 @@
-# Flipper RF
+![RF Observatory](assets/banner.svg)
+
+# RF Observatory
 
 Real-time RF signal intelligence using Flipper Zero's Sub-GHz radio.
 
@@ -9,15 +11,15 @@ Stream, fingerprint, and decode wireless signals on 315/433/868/915 MHz bands.
 - **Real-time streaming** - WebSocket-based live signal feed
 - **Signal fingerprinting** - MD5 hash of quantized pulse patterns for tracking unique devices
 - **Protocol classification** - Timing-based identification of common protocols:
-  - 🚗 Princeton (fixed code remotes)
-  - 🚧 CAME / Nice FLO (gate remotes)
-  - 🔐 KeeLoq (rolling code)
-  - 🌡️ Oregon Scientific (weather sensors)
-  - ⚡ Smart meters
-  - 🛞 TPMS (tire pressure)
+  - Car remotes (Princeton, fixed code)
+  - Gate remotes (CAME, Nice FLO)
+  - Rolling code (KeeLoq)
+  - Weather sensors (Oregon Scientific)
+  - Smart meters
+  - TPMS (tire pressure)
   - And more...
 - **Band health metrics** - Entropy, burst rate, unique signals per minute
-- **Web dashboard** - Dark-themed real-time visualization
+- **Web dashboard** - Dark-themed real-time visualization with waterfall, signal inspector, and event stream
 
 ## Requirements
 
@@ -25,43 +27,45 @@ Stream, fingerprint, and decode wireless signals on 315/433/868/915 MHz bands.
 - Python 3.11+
 - macOS/Linux (tested on macOS)
 
-## Setup
+## Quick Start
 
 ```bash
+# Install dependencies
 make deps
+
+# Start with Flipper (auto-detect port)
+make start
+
+# Or run without Flipper (mock mode for UI dev)
+make mock
 ```
 
-## Usage
+Open http://localhost:8765/
 
-### Start (recommended)
+## Configuration
 
-Starts the main dashboard (RF Decode):
+All configuration is via CLI flags:
 
 ```bash
-make start PORT=auto
-# Open http://localhost:8765/decode.html
+# Focus on a single band
+make start FREQS=433.92
+
+# Custom ports
+make start HTTP_PORT=8875 WS_PORT=8876
+
+# Faster capture cycles
+make start CAPTURE_DURATION=0.4
+
+# Specific serial port
+make start PORT=/dev/ttyACM0
 ```
 
-For UI/dev without a Flipper:
+Or run directly:
 ```bash
-make mock-decode
+python3 rf_app.py --port auto --freqs 433.92 --capture-duration 0.4
 ```
 
-### What’s “Decode” vs “Intel”?
-
-- **Decode** = tries to **classify protocols** (Princeton/CAME/KeeLoq/etc) and provides a “signal inspector” view.
-- **Intel** = **fingerprint + band health** focused (bursts/entropy/unique/min), less about protocol labeling.
-
-If you only want “a webpage with cool data”, use **Decode**.
-
-### RF Intel (optional)
-
-```bash
-make start-intel PORT=auto
-# Open http://localhost:8765/intel.html
-```
-
-### Flipper Tool
+## Flipper Tool
 
 Python wrapper for direct Flipper CLI access:
 
@@ -76,41 +80,23 @@ with FlipperTool('/dev/cu.usbmodemflip_XXX') as f:
     timings = f.subghz_rx_raw(433920000, duration=2.0)
 ```
 
-## Configuration
-
-Set the Flipper serial port via `--port` (or env var `FLIPPER_PORT`):
-
-```bash
-# macOS
-python3 rf_decode.py --port /dev/cu.usbmodemflip_XXXXX
-
-# Linux
-python3 rf_decode.py --port /dev/ttyACM0
-```
-
-You can also focus on a single band for faster/steadier updates:
-```bash
-make decode PORT=auto FREQS=433.92
-```
-
 ## Architecture
 
 ```
-┌─────────────┐    Serial     ┌─────────────┐
-│ Flipper Zero│◄────────────►│ Python      │
-│ (Sub-GHz RX)│   230400 baud │ Capture     │
-└─────────────┘               │ Thread      │
-                              └──────┬──────┘
-                                     │ Queue
-                              ┌──────▼──────┐
-                              │ WebSocket   │
-                              │ Broadcast   │
-                              └──────┬──────┘
-                                     │ JSON
-                              ┌──────▼──────┐
-                              │ Browser     │
-                              │ Dashboard   │
-                              └─────────────┘
+                              RF Observatory
+                              Single URL: http://localhost:8765/
+
++-------------+    Serial     +-------------+
+| Flipper Zero|<------------>| rf_app.py   |
+| (Sub-GHz RX)|   230400 baud | - capture   |
++-------------+               | - classify  |
+                              | - websocket |
+                              +------+------+
+                                     | JSON
+                              +------v------+
+                              | Browser     |
+                              | Dashboard   |
+                              +-------------+
 ```
 
 ## Protocol Classification
@@ -119,13 +105,13 @@ Signals are classified based on timing analysis:
 
 | Protocol | Pulse Width | Min Pulses | Typical Use |
 |----------|-------------|------------|-------------|
-| Princeton | 200-500µs | 20 | Car remotes, garage doors |
-| CAME | 250-400µs | 12 | European gates |
-| Nice FLO | 600-900µs | 12 | European gates |
-| KeeLoq | 300-500µs | 60 | Secure rolling code |
-| Oregon v2 | 400-700µs | 100 | Weather stations |
-| Smart Meter | 15-50µs | 100 | Utility meters |
-| TPMS | 40-80µs | 50 | Tire pressure |
+| Princeton | 200-500us | 20 | Car remotes, garage doors |
+| CAME | 250-400us | 12 | European gates |
+| Nice FLO | 600-900us | 12 | European gates |
+| KeeLoq | 300-500us | 60 | Secure rolling code |
+| Oregon v2 | 400-700us | 100 | Weather stations |
+| Smart Meter | 15-50us | 100 | Utility meters |
+| TPMS | 40-80us | 50 | Tire pressure |
 
 ## Legal
 

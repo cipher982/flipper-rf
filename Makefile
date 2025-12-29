@@ -1,6 +1,6 @@
-.PHONY: help venv deps start start-intel decode intel mock-decode mock-intel clean-venv clean-tmp
+.PHONY: help venv deps start mock clean
 
-# Defaults (override on command line: make decode PORT=auto)
+# Defaults (override on command line: make start PORT=auto)
 PORT ?= auto
 HTTP_PORT ?= 8765
 WS_PORT ?= 8766
@@ -11,26 +11,19 @@ CAPTURE_DURATION ?=
 PY ?= python3
 
 help:
-	@echo "flipper-rf"
+	@echo "RF Observatory"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make venv          Create .venv via uv"
-	@echo "  make deps          Install deps into .venv (uv pip)"
-	@echo "  make start         Start the main dashboard server (RF Decode)"
-	@echo "  make start-intel   Start the Intel dashboard server"
-	@echo "  make decode        Run rf_decode.py (PORT=$(PORT))"
-	@echo "  make intel         Run rf_intel.py (PORT=$(PORT))"
-	@echo "  make mock-decode   Run rf_decode.py --mock"
-	@echo "  make mock-intel    Run rf_intel.py --mock"
-	@echo "  make clean-venv    Remove .venv"
-	@echo "  make clean-tmp     Remove $(WORK_DIR) (CAREFUL)"
+	@echo "  make start     Start the dashboard (primary)"
+	@echo "  make mock      Start with synthetic signals (no Flipper)"
+	@echo "  make deps      Install dependencies"
+	@echo "  make clean     Remove .venv and temp files"
 	@echo ""
 	@echo "Common overrides:"
-	@echo "  make decode PORT=auto"
-	@echo "  make decode FREQS=433.92"
-	@echo "  make decode HTTP_PORT=8875 WS_PORT=8876"
-	@echo "  make decode WORK_DIR=/tmp/flipper_explore_decode"
-	@echo "  make decode CAPTURE_DURATION=0.4"
+	@echo "  make start PORT=/dev/ttyACM0"
+	@echo "  make start FREQS=433.92"
+	@echo "  make start HTTP_PORT=8875 WS_PORT=8876"
+	@echo "  make start CAPTURE_DURATION=0.4"
 
 venv:
 	uv venv
@@ -39,7 +32,7 @@ deps: venv
 	. .venv/bin/activate && uv pip install websockets pyserial
 
 define run_py
-	. .venv/bin/activate && $(PY) $(1) \
+	. .venv/bin/activate && $(PY) rf_app.py \
 		--port "$(PORT)" \
 		--http-port "$(HTTP_PORT)" \
 		--ws-port "$(WS_PORT)" \
@@ -48,18 +41,11 @@ define run_py
 		$(if $(CAPTURE_DURATION),--capture-duration "$(CAPTURE_DURATION)",)
 endef
 
-decode: deps
-	$(call run_py,rf_decode.py)
+start: deps
+	$(call run_py)
 
-intel: deps
-	$(call run_py,rf_intel.py)
-
-start: decode
-
-start-intel: intel
-
-mock-decode: deps
-	. .venv/bin/activate && $(PY) rf_decode.py \
+mock: deps
+	. .venv/bin/activate && $(PY) rf_app.py \
 		--mock \
 		--http-port "$(HTTP_PORT)" \
 		--ws-port "$(WS_PORT)" \
@@ -67,17 +53,5 @@ mock-decode: deps
 		$(if $(FREQS),--freqs "$(FREQS)",) \
 		$(if $(CAPTURE_DURATION),--capture-duration "$(CAPTURE_DURATION)",)
 
-mock-intel: deps
-	. .venv/bin/activate && $(PY) rf_intel.py \
-		--mock \
-		--http-port "$(HTTP_PORT)" \
-		--ws-port "$(WS_PORT)" \
-		--work-dir "$(WORK_DIR)" \
-		$(if $(FREQS),--freqs "$(FREQS)",) \
-		$(if $(CAPTURE_DURATION),--capture-duration "$(CAPTURE_DURATION)",)
-
-clean-venv:
-	rm -rf .venv
-
-clean-tmp:
-	rm -rf "$(WORK_DIR)"
+clean:
+	rm -rf .venv "$(WORK_DIR)"
