@@ -585,18 +585,17 @@ def get_signal_label(signal):
     """Generate human-readable label for signal."""
     proto = signal.get('protocol', {})
     if not proto:
-        return 'Unknown Signal'
+        return 'Unknown signal'
 
-    icon = proto.get('icon', '\U0001F4FB')
     desc = proto.get('desc', 'Signal')
     conf = proto.get('confidence', 0)
 
     if conf >= 60:
-        return f"{icon} {desc}"
+        return f"{desc}"
     elif conf >= 40:
-        return f"{icon} {desc}?"
+        return f"{desc}?"
     else:
-        return f"{icon} {desc} (weak match)"
+        return f"{desc} (weak match)"
 
 
 def decode_timings(timings: list[int], freq_mhz: float) -> tuple[list[dict], list[dict], int]:
