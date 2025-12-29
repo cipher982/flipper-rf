@@ -1,4 +1,4 @@
-.PHONY: help venv deps decode intel mock-decode mock-intel clean-venv clean-tmp
+.PHONY: help venv deps start start-intel decode intel mock-decode mock-intel clean-venv clean-tmp
 
 # Defaults (override on command line: make decode PORT=auto)
 PORT ?= auto
@@ -16,6 +16,8 @@ help:
 	@echo "Targets:"
 	@echo "  make venv          Create .venv via uv"
 	@echo "  make deps          Install deps into .venv (uv pip)"
+	@echo "  make start         Start the main dashboard server (RF Decode)"
+	@echo "  make start-intel   Start the Intel dashboard server"
 	@echo "  make decode        Run rf_decode.py (PORT=$(PORT))"
 	@echo "  make intel         Run rf_intel.py (PORT=$(PORT))"
 	@echo "  make mock-decode   Run rf_decode.py --mock"
@@ -52,6 +54,10 @@ decode: deps
 intel: deps
 	$(call run_py,rf_intel.py)
 
+start: decode
+
+start-intel: intel
+
 mock-decode: deps
 	. .venv/bin/activate && $(PY) rf_decode.py \
 		--mock \
@@ -75,4 +81,3 @@ clean-venv:
 
 clean-tmp:
 	rm -rf "$(WORK_DIR)"
-

@@ -33,12 +33,12 @@ make deps
 
 ## Usage
 
-### RF Decode (recommended)
+### Start (recommended)
 
-Full protocol classification and semantic labeling:
+Starts the main dashboard (RF Decode):
 
 ```bash
-make decode PORT=auto
+make start PORT=auto
 # Open http://localhost:8765/decode.html
 ```
 
@@ -47,12 +47,17 @@ For UI/dev without a Flipper:
 make mock-decode
 ```
 
-### RF Intel
+### What’s “Decode” vs “Intel”?
 
-Fingerprinting-focused view with burst detection:
+- **Decode** = tries to **classify protocols** (Princeton/CAME/KeeLoq/etc) and provides a “signal inspector” view.
+- **Intel** = **fingerprint + band health** focused (bursts/entropy/unique/min), less about protocol labeling.
+
+If you only want “a webpage with cool data”, use **Decode**.
+
+### RF Intel (optional)
 
 ```bash
-make intel PORT=auto
+make start-intel PORT=auto
 # Open http://localhost:8765/intel.html
 ```
 
