@@ -28,12 +28,7 @@ Stream, fingerprint, and decode wireless signals on 315/433/868/915 MHz bands.
 ## Setup
 
 ```bash
-# Create venv
-uv venv
-source .venv/bin/activate
-
-# Install deps
-uv pip install pyserial websockets
+make deps
 ```
 
 ## Usage
@@ -43,13 +38,13 @@ uv pip install pyserial websockets
 Full protocol classification and semantic labeling:
 
 ```bash
-python3 rf_decode.py --port auto
+make decode PORT=auto
 # Open http://localhost:8765/decode.html
 ```
 
 For UI/dev without a Flipper:
 ```bash
-python3 rf_decode.py --mock
+make mock-decode
 ```
 
 ### RF Intel
@@ -57,7 +52,7 @@ python3 rf_decode.py --mock
 Fingerprinting-focused view with burst detection:
 
 ```bash
-python3 rf_intel.py --port auto
+make intel PORT=auto
 # Open http://localhost:8765/intel.html
 ```
 
@@ -90,7 +85,7 @@ python3 rf_decode.py --port /dev/ttyACM0
 
 You can also focus on a single band for faster/steadier updates:
 ```bash
-python3 rf_decode.py --port auto --freqs 433.92
+make decode PORT=auto FREQS=433.92
 ```
 
 ## Architecture
